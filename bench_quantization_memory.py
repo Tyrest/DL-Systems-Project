@@ -9,12 +9,20 @@ import argparse
 import os
 import sys
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Memory comparison for quantization.")
-    p.add_argument("--in-features", type=int, default=1024, help="Input dim.")
-    p.add_argument("--out-features", type=int, default=4096, help="Output dim.")
+    p.add_argument("--in-features", type=int, default=1024, help="Input dim for single-layer report.")
+    p.add_argument("--out-features", type=int, default=4096, help="Output dim for single-layer report.")
+    p.add_argument(
+        "--sizes",
+        type=str,
+        default="256,512,1024,2048,4096",
+        help="Comma-separated list of square layer sizes to plot (in=out=size).",
+    )
+    p.add_argument("--save", type=str, default="memory_plot.png", help="Path to save plot.")
     return p.parse_args()
 
 
@@ -56,6 +64,31 @@ def main() -> None:
     )
     reduction = 1 - (int8_bytes / float_bytes)
     print(f"Memory reduction: {reduction*100:.2f}%")
+
+    # Plot across sizes
+    sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
+    float_list = []
+    int8_list = []
+    for sz in sizes:
+        tmp = ndl.nn.Linear(sz, sz, bias=True, dtype="float32")
+        q_sz = tmp.enable_quantization(axis=1)
+        params = sz * sz + sz
+        float_b = params * 4
+        int8_b = q_sz.memory_bytes() + sz * 4
+        float_list.append(float_b / 1e6)
+        int8_list.append(int8_b / 1e6)
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(sizes, float_list, label="float32", marker="o")
+    plt.plot(sizes, int8_list, label="int8 (weights)", marker="o")
+    plt.xlabel("Layer size (in=out)")
+    plt.ylabel("Memory (MB)")
+    plt.title("Parameter memory vs layer size")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(args.save)
+    print(f"Saved plot to {args.save}")
 
 
 if __name__ == "__main__":
