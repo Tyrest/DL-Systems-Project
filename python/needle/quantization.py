@@ -106,3 +106,28 @@ def quantized_matmul(lhs: Tensor, rhs: QuantizedTensor, bias: Optional[Tensor] =
     if bias is not None:
         out = out + bias
     return out
+
+
+def quantized_matmul_int8(lhs: Tensor, rhs: QuantizedTensor, bias: Optional[Tensor] = None) -> Tensor:
+    """Int8×int8→int32 matmul via CPU backend; quantizes activations per-call.
+
+    Note: rhs.scale is reduced to a scalar (mean) if per-axis; this keeps API simple.
+    """
+    import needle.backend_ndarray.ndarray_backend_cpu as cpu_backend  # type: ignore[import-not-found]
+
+    lhs_np = lhs.realize_cached_data().astype(np.float32)
+    # activation quantization
+    a_scale = np.max(np.abs(lhs_np))
+    if a_scale == 0:
+        a_scale = 1.0
+    a_scale = a_scale / 127.0
+    a_int8 = np.clip(np.round(lhs_np / a_scale), -128, 127).astype(np.int8)
+
+    # weight use existing quantization (may be per-axis); collapse scale to scalar for now
+    w_int8 = rhs.data
+    w_scale = rhs.scale.mean().item() if rhs.scale.size > 1 else float(rhs.scale.item())
+
+    out = cpu_backend.matmul_int8(a_int8, w_int8, float(a_scale), float(w_scale))
+    if bias is not None:
+        out += bias.realize_cached_data()
+    return Tensor.make_const(out.astype(np.float32), requires_grad=False)

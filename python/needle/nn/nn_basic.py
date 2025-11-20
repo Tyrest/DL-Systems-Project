@@ -1,6 +1,7 @@
 """The module.
 """
 from typing import Any
+import os
 from needle.autograd import Tensor
 from needle import ops
 import needle.init as init
@@ -132,6 +133,13 @@ class Linear(Module):
     def forward(self, X: Tensor) -> Tensor:
         ### BEGIN YOUR SOLUTION
         if self.use_int8 and not self.training and self._weight_q is not None:
+            use_int8_kernel = os.environ.get("NEEDLE_USE_INT8_MATMUL", "0") == "1"
+            if use_int8_kernel:
+                try:
+                    out = quantization.quantized_matmul_int8(X, self._weight_q, getattr(self, "bias", None))
+                    return out
+                except Exception:
+                    pass
             weight = self._weight_deq if self._weight_deq is not None else self._weight_q.dequantize()
             out = ops.matmul(X, weight)
             if hasattr(self, "bias"):

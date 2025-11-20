@@ -3,8 +3,13 @@
 #include <pybind11/stl.h>
 
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 namespace needle {
 namespace cpu {
@@ -423,4 +428,87 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+
+  // Simple int8 matmul for benchmark/inference use.
+  // Inputs are numpy int8 arrays with shapes (m,k) and (k,n), plus scales.
+  // Produces float32 numpy array.
+  m.def(
+      "matmul_int8",
+      [](py::array_t<int8_t, py::array::c_style | py::array::forcecast> a,
+         py::array_t<int8_t, py::array::c_style | py::array::forcecast> b,
+         float a_scale, float b_scale) {
+        auto a_buf = a.request();
+        auto b_buf = b.request();
+        if (a_buf.ndim != 2 || b_buf.ndim != 2) {
+          throw std::runtime_error("int8 matmul expects 2D inputs");
+        }
+        auto m = a_buf.shape[0];
+        auto k_a = a_buf.shape[1];
+        auto k_b = b_buf.shape[0];
+        auto n = b_buf.shape[1];
+        if (k_a != k_b) {
+          throw std::runtime_error("Inner dims must match");
+        }
+        // Transpose B to make columns contiguous for vectorized dot products.
+        std::vector<int8_t> bT(n * k_a);
+        {
+          int8_t* b_ptr = static_cast<int8_t*>(b_buf.ptr);
+          for (ssize_t kk = 0; kk < k_a; kk++) {
+            for (ssize_t j = 0; j < n; j++) {
+              bT[j * k_a + kk] = b_ptr[kk * n + j];
+            }
+          }
+        }
+        py::array_t<float> out({m, n});
+        auto out_buf = out.request();
+        int8_t* a_ptr = static_cast<int8_t*>(a_buf.ptr);
+        float* o_ptr = static_cast<float*>(out_buf.ptr);
+#ifdef __AVX2__
+        __m256i ones = _mm256_set1_epi16(1);
+#endif
+        for (ssize_t i = 0; i < m; i++) {
+          int8_t* ai = a_ptr + i * k_a;
+          for (ssize_t j = 0; j < n; j++) {
+            int32_t acc = 0;
+#ifdef __AVX2__
+            int kk = 0;
+            __m256i vacc0 = _mm256_setzero_si256();
+            __m256i vacc1 = _mm256_setzero_si256();
+            for (; kk + 32 <= k_a; kk += 32) {
+              __m256i va0 = _mm256_cvtepi8_epi16(
+                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(ai + kk)));
+              __m256i vb0 = _mm256_cvtepi8_epi16(
+                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(bT.data() + j * k_a + kk)));
+              __m256i prod0 = _mm256_mullo_epi16(va0, vb0);
+              vacc0 = _mm256_add_epi32(vacc0, _mm256_madd_epi16(prod0, ones));
+
+              __m256i va1 = _mm256_cvtepi8_epi16(
+                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(ai + kk + 16)));
+              __m256i vb1 = _mm256_cvtepi8_epi16(
+                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(bT.data() + j * k_a + kk + 16)));
+              __m256i prod1 = _mm256_mullo_epi16(va1, vb1);
+              vacc1 = _mm256_add_epi32(vacc1, _mm256_madd_epi16(prod1, ones));
+            }
+            // horizontal add accumulators
+            alignas(32) int32_t tmp[8];
+            _mm256_store_si256(reinterpret_cast<__m256i*>(tmp), vacc0);
+            for (int t = 0; t < 8; t++) acc += tmp[t];
+            _mm256_store_si256(reinterpret_cast<__m256i*>(tmp), vacc1);
+            for (int t = 0; t < 8; t++) acc += tmp[t];
+            for (; kk < k_a; kk++) {
+              acc += static_cast<int32_t>(ai[kk]) * static_cast<int32_t>(bT[j * k_a + kk]);
+            }
+#else
+            for (ssize_t kk = 0; kk < k_a; kk++) {
+              acc += static_cast<int32_t>(ai[kk]) *
+                     static_cast<int32_t>(bT[j * k_a + kk]);
+            }
+#endif
+            o_ptr[i * n + j] = static_cast<float>(acc) * a_scale * b_scale;
+          }
+        }
+        return out;
+      },
+      py::arg("a"), py::arg("b"), py::arg("a_scale"), py::arg("b_scale"),
+      "Int8 matmul (a: m x k, b: k x n) returning float32.");
 }

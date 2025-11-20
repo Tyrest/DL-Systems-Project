@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <sstream>
+#include <vector>
 
 namespace needle {
 namespace cuda {
@@ -498,6 +499,20 @@ void ReduceSum(const CudaArray& a, CudaArray* out, size_t reduce_size) {
   /// END SOLUTION
 }
 
+// Simple int8 matmul kernel: int8 x int8 -> int32 accumulation, rescale to float
+__global__ void MatmulInt8Kernel(const int8_t* a, const int8_t* b, float* out, int64_t m,
+                                 int64_t k, int64_t n, float a_scale, float b_scale) {
+  int row = blockIdx.y * blockDim.y + threadIdx.y;
+  int col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < m && col < n) {
+    int32_t acc = 0;
+    for (int kk = 0; kk < k; kk++) {
+      acc += static_cast<int32_t>(a[row * k + kk]) * static_cast<int32_t>(b[kk * n + col]);
+    }
+    out[row * n + col] = static_cast<float>(acc) * a_scale * b_scale;
+  }
+}
+
 }  // namespace cuda
 }  // namespace needle
 
@@ -567,4 +582,45 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+
+  // Naive int8 matmul on CUDA: copies inputs to device, runs kernel, copies result back.
+  m.def(
+      "matmul_int8",
+      [](py::array_t<int8_t, py::array::c_style | py::array::forcecast> a,
+         py::array_t<int8_t, py::array::c_style | py::array::forcecast> b,
+         float a_scale, float b_scale) {
+        auto a_buf = a.request();
+        auto b_buf = b.request();
+        if (a_buf.ndim != 2 || b_buf.ndim != 2) {
+          throw std::runtime_error("int8 matmul expects 2D inputs");
+        }
+        int64_t m = a_buf.shape[0];
+        int64_t k_a = a_buf.shape[1];
+        int64_t k_b = b_buf.shape[0];
+        int64_t n = b_buf.shape[1];
+        if (k_a != k_b) {
+          throw std::runtime_error("Inner dims must match");
+        }
+        py::array_t<float> out({m, n});
+        // allocate device buffers
+        int8_t *d_a = nullptr, *d_b = nullptr;
+        float* d_out = nullptr;
+        cudaMalloc(&d_a, m * k_a * sizeof(int8_t));
+        cudaMalloc(&d_b, k_b * n * sizeof(int8_t));
+        cudaMalloc(&d_out, m * n * sizeof(float));
+        cudaMemcpy(d_a, a_buf.ptr, m * k_a * sizeof(int8_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_b, b_buf.ptr, k_b * n * sizeof(int8_t), cudaMemcpyHostToDevice);
+
+        dim3 block(16, 16);
+        dim3 grid((n + block.x - 1) / block.x, (m + block.y - 1) / block.y);
+        MatmulInt8Kernel<<<grid, block>>>(d_a, d_b, d_out, m, k_a, n, a_scale, b_scale);
+
+        cudaMemcpy(out.request().ptr, d_out, m * n * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaFree(d_a);
+        cudaFree(d_b);
+        cudaFree(d_out);
+        return out;
+      },
+      py::arg("a"), py::arg("b"), py::arg("a_scale"), py::arg("b_scale"),
+      "Int8 matmul on CUDA (a: m x k, b: k x n) returning float32.");
 }
