@@ -59,6 +59,7 @@ class QuantizedTensor:
     data: np.ndarray
     scale: np.ndarray
     zero_point: np.ndarray
+    cached_dequantized: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
         assert self.data.dtype == np.int8, "Quantized data must be int8"
@@ -67,10 +68,12 @@ class QuantizedTensor:
 
     def dequantize(self, device=None) -> Tensor:
         """Dequantize into a float32 Tensor detached from autograd."""
-        scale = self.scale
-        zero_point = self.zero_point.astype(np.int32)
-        float_data = (self.data.astype(np.int32) - zero_point) * scale
-        return Tensor.make_const(float_data.astype(np.float32), requires_grad=False)
+        if self.cached_dequantized is None:
+            scale = self.scale
+            zero_point = self.zero_point.astype(np.int32)
+            float_data = (self.data.astype(np.int32) - zero_point) * scale
+            self.cached_dequantized = float_data.astype(np.float32)
+        return Tensor.make_const(self.cached_dequantized, requires_grad=False)
 
     def memory_bytes(self) -> int:
         return int(self.data.nbytes + self.scale.nbytes + self.zero_point.nbytes)
@@ -97,15 +100,9 @@ def dequantize_int8(q: QuantizedTensor, device=None) -> Tensor:
 
 
 def quantized_matmul(lhs: Tensor, rhs: QuantizedTensor, bias: Optional[Tensor] = None) -> Tensor:
-    """Matrix multiply using int8 weights and float activations.
-
-    The compute itself still happens in float32 for simplicity, but the
-    quantized weights reduce storage overhead and can be reused across calls.
-    """
-    lhs_np = lhs.realize_cached_data().astype(np.float32)
-    w_int = rhs.data.astype(np.int32) - rhs.zero_point.astype(np.int32)
-    weight = w_int.astype(np.float32) * rhs.scale
-    out = lhs_np @ weight
+    """Matrix multiply using cached dequantized weights to avoid per-call overhead."""
+    weight = rhs.dequantize()
+    out = lhs @ weight
     if bias is not None:
-        out = out + bias.realize_cached_data()
-    return Tensor.make_const(out.astype(np.float32), requires_grad=False)
+        out = out + bias
+    return out

@@ -106,6 +106,7 @@ class Linear(Module):
         self.out_features = out_features
         self.use_int8 = use_int8
         self._weight_q = None
+        self._weight_deq = None
         self._quant_axis = 1
 
         ### BEGIN YOUR SOLUTION
@@ -119,16 +120,22 @@ class Linear(Module):
         axis = self._quant_axis if axis is None else axis
         self._weight_q = quantization.quantize_int8(self.weight.detach(), axis=axis, symmetric=symmetric)
         self.use_int8 = True
+        # Cache dequantized float weight to avoid per-call reconstruction overhead
+        self._weight_deq = self._weight_q.dequantize()
         return self._weight_q
 
     def disable_quantization(self) -> None:
         self._weight_q = None
+        self._weight_deq = None
         self.use_int8 = False
 
     def forward(self, X: Tensor) -> Tensor:
         ### BEGIN YOUR SOLUTION
         if self.use_int8 and not self.training and self._weight_q is not None:
-            out = quantization.quantized_matmul(X, self._weight_q, getattr(self, "bias", None))
+            weight = self._weight_deq if self._weight_deq is not None else self._weight_q.dequantize()
+            out = ops.matmul(X, weight)
+            if hasattr(self, "bias"):
+                out = out + ops.broadcast_to(self.bias, out.shape)
         else:
             out = ops.matmul(X, self.weight)
             if hasattr(self, "bias"):
