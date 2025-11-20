@@ -14,6 +14,7 @@ import numpy as np
 
 
 def parse_args() -> argparse.Namespace:
+    """CLI args for larger two-layer benchmark."""
     parser = argparse.ArgumentParser(description="Large-mode Needle quantization benchmark.")
     parser.add_argument("--batch", type=int, default=512, help="Batch size.")
     parser.add_argument("--in-features", type=int, default=4096, help="Input feature dimension.")
@@ -24,12 +25,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensure_backend() -> None:
+    """Set backend env and sys.path for Needle imports."""
     if "NEEDLE_BACKEND" not in os.environ:
         os.environ["NEEDLE_BACKEND"] = "nd"
     sys.path.append("./python")
 
 
 def benchmark_mlp(batch: int, in_features: int, hidden: int, out_features: int, steps: int) -> dict:
+    """Run a two-layer MLP forward benchmark for float32 vs quantized weights."""
     import needle as ndl
 
     l1 = ndl.nn.Linear(in_features, hidden, bias=True, dtype="float32")
@@ -66,6 +69,7 @@ def benchmark_mlp(batch: int, in_features: int, hidden: int, out_features: int, 
 
 
 def main() -> None:
+    """Entry point: run benchmark and print stats."""
     args = parse_args()
     ensure_backend()
     print(f"Backend: {os.environ.get('NEEDLE_BACKEND', 'nd')}")

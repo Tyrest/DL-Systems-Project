@@ -43,6 +43,7 @@ MNIST_URLS = {
 
 
 def parse_args() -> argparse.Namespace:
+    """CLI args for MNIST training demo (float32 vs quantized)."""
     p = argparse.ArgumentParser(description="Train MNIST float32 vs int8 models.")
     p.add_argument("--data-dir", type=str, default="data/mnist", help="Where to store MNIST gzip files.")
     p.add_argument("--epochs", type=int, default=5, help="Number of training epochs.")
@@ -53,12 +54,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensure_backend() -> None:
+    """Ensure Needle backend env and import path are set."""
     if "NEEDLE_BACKEND" not in os.environ:
         os.environ["NEEDLE_BACKEND"] = "nd"
     sys.path.append("./python")
 
 
 def download_mnist(data_dir: Path) -> dict:
+    """Download MNIST from multiple mirrors if not present."""
     data_dir.mkdir(parents=True, exist_ok=True)
     paths = {}
     for key, url_list in MNIST_URLS.items():
@@ -80,6 +83,7 @@ def download_mnist(data_dir: Path) -> dict:
 
 
 def load_images(path: Path) -> np.ndarray:
+    """Read IDX image file and return flattened float32 images."""
     with gzip.open(path, "rb") as f:
         magic = int.from_bytes(f.read(4), "big")
         assert magic == 2051
@@ -91,6 +95,7 @@ def load_images(path: Path) -> np.ndarray:
 
 
 def load_labels(path: Path) -> np.ndarray:
+    """Read IDX label file and return label array."""
     with gzip.open(path, "rb") as f:
         magic = int.from_bytes(f.read(4), "big")
         assert magic == 2049
@@ -101,6 +106,7 @@ def load_labels(path: Path) -> np.ndarray:
 
 
 def iterate_batches(X, y, batch_size, shuffle=True):
+    """Yield mini-batches of numpy data."""
     idx = np.arange(len(X))
     if shuffle:
         np.random.shuffle(idx)
@@ -120,6 +126,7 @@ def build_model(in_dim: int, hidden: int, out_dim: int):
 
 
 def accuracy(model, X, y, batch_size=512):
+    """Compute accuracy over a dataset using mini-batches."""
     import needle as ndl
 
     correct = 0
@@ -133,6 +140,7 @@ def accuracy(model, X, y, batch_size=512):
 
 
 def main() -> None:
+    """Train/evaluate separate float32 and int8-weight MNIST models and report stats."""
     args = parse_args()
     ensure_backend()
     import needle as ndl
@@ -149,6 +157,7 @@ def main() -> None:
     loss_fn = ndl.nn.SoftmaxLoss()
 
     def train_model(model, opt, label):
+        """Train a model for the configured epochs and return elapsed time."""
         model.train()
         t0 = time.perf_counter()
         for epoch in range(args.epochs):

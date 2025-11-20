@@ -14,6 +14,7 @@ import numpy as np
 
 
 def parse_args() -> argparse.Namespace:
+    """CLI args for the XL four-layer benchmark."""
     p = argparse.ArgumentParser(description="XL Needle quantization benchmark.")
     p.add_argument("--batch", type=int, default=1024, help="Batch size.")
     p.add_argument("--dim", type=int, default=8192, help="Hidden dimension for all layers.")
@@ -22,12 +23,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensure_backend() -> None:
+    """Set backend env and sys.path for Needle imports."""
     if "NEEDLE_BACKEND" not in os.environ:
         os.environ["NEEDLE_BACKEND"] = "nd"
     sys.path.append("./python")
 
 
 def _stack_linear(dim: int):
+    """Build a list of Linear layers for the XL stack."""
     import needle as ndl
 
     return [
@@ -37,6 +40,7 @@ def _stack_linear(dim: int):
 
 
 def forward(model, x, ndl):
+    """Forward pass through the stack with ReLU activations."""
     out = x
     for layer in model:
         out = ndl.ops.relu(layer(out))
@@ -44,6 +48,7 @@ def forward(model, x, ndl):
 
 
 def benchmark(dim: int, batch: int, steps: int) -> dict:
+    """Benchmark float32 vs quantized XL stack forwards."""
     import needle as ndl
 
     model = _stack_linear(dim)
@@ -76,6 +81,7 @@ def benchmark(dim: int, batch: int, steps: int) -> dict:
 
 
 def main() -> None:
+    """Entry point: run XL benchmark and print timing."""
     args = parse_args()
     ensure_backend()
     print(f"Backend: {os.environ.get('NEEDLE_BACKEND', 'nd')}")

@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 
 
 def parse_args() -> argparse.Namespace:
+    """CLI args for memory reporting and plotting across sizes."""
     p = argparse.ArgumentParser(description="Memory comparison for quantization.")
     p.add_argument("--in-features", type=int, default=1024, help="Input dim for single-layer report.")
     p.add_argument("--out-features", type=int, default=4096, help="Output dim for single-layer report.")
@@ -27,16 +28,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensure_backend() -> None:
+    """Set backend env and sys.path for Needle imports."""
     if "NEEDLE_BACKEND" not in os.environ:
         os.environ["NEEDLE_BACKEND"] = "nd"
     sys.path.append("./python")
 
 
 def bytes_to_mb(num_bytes: int) -> float:
+    """Convert bytes to megabytes."""
     return num_bytes / (1024 * 1024)
 
 
 def main() -> None:
+    """Entry point: print single-layer memory stats and plot across sizes."""
     args = parse_args()
     ensure_backend()
     import needle as ndl
