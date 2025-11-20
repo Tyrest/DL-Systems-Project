@@ -2,7 +2,7 @@
 import needle
 from .backend_numpy import Device, cpu, all_devices
 from typing import List, Optional, NamedTuple, Tuple, Union
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 import numpy
 
 from needle import init
@@ -17,7 +17,6 @@ TENSOR_COUNTER = 0
 import numpy as array_api
 NDArray = numpy.ndarray
 
-from .backend_selection import array_api, NDArray
 
 class Op:
     """Operator definition."""
@@ -248,9 +247,9 @@ class Tensor(Value):
         tensor._init(
             None,
             [],
-            cached_data=data
-            if not isinstance(data, Tensor)
-            else data.realize_cached_data(),
+            cached_data=(
+                data if not isinstance(data, Tensor) else data.realize_cached_data()
+            ),
             requires_grad=requires_grad,
         )
         return tensor
@@ -305,7 +304,7 @@ class Tensor(Value):
     def numpy(self):
         data = self.realize_cached_data()
         if array_api is numpy:
-            return data
+            return numpy.array(data)
         return data.numpy()
 
     def __add__(self, other):
@@ -359,8 +358,6 @@ class Tensor(Value):
     def transpose(self, axes=None):
         return needle.ops.Transpose(axes)(self)
 
-
-
     __radd__ = __add__
     __rmul__ = __mul__
 
@@ -371,7 +368,7 @@ def compute_gradient_of_variables(output_tensor, out_grad):
     Store the computed result in the grad field of each Variable.
     """
     # a map from node to a list of gradient contributions from each output node
-    node_to_output_grads_list: Dict[Tensor, List[Tensor]] = {}
+    node_to_output_grads_list: dict[Tensor, List[Tensor]] = defaultdict(list)
     # Special note on initializing gradient of
     # We are really taking a derivative of the scalar reduce_sum(output_node)
     # instead of the vector output_node. But this is the common case for loss function.
@@ -381,7 +378,15 @@ def compute_gradient_of_variables(output_tensor, out_grad):
     reverse_topo_order = list(reversed(find_topo_sort([output_tensor])))
 
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    for node in reverse_topo_order:
+        if node not in node_to_output_grads_list:
+            raise RuntimeError("No outgrad found for node in topo sort")
+        node.grad = sum_node_list(node_to_output_grads_list[node])
+        if not node.requires_grad or node.is_leaf():
+            continue
+        out_grads = node.op.gradient_as_tuple(node.grad, node)
+        for input, out_grad in zip(node.inputs, out_grads):
+            node_to_output_grads_list[input].append(out_grad)
     ### END YOUR SOLUTION
 
 
@@ -394,14 +399,23 @@ def find_topo_sort(node_list: List[Value]) -> List[Value]:
     sort.
     """
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    visited = set()
+    topo_order = []
+    for node in node_list:
+        topo_sort_dfs(node, visited, topo_order)
+    return topo_order
     ### END YOUR SOLUTION
 
 
 def topo_sort_dfs(node, visited, topo_order):
     """Post-order DFS"""
     ### BEGIN YOUR SOLUTION
-    raise NotImplementedError()
+    if node in visited:
+        return
+    visited.add(node)
+    for child in node.inputs:
+        topo_sort_dfs(child, visited, topo_order)
+    topo_order.append(node)
     ### END YOUR SOLUTION
 
 
