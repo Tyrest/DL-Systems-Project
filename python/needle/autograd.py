@@ -17,7 +17,7 @@ TENSOR_COUNTER = 0
 import numpy as array_api
 NDArray = numpy.ndarray
 
-from .backend_selection import array_api, NDArray, default_device
+from .backend_selection import array_api, NDArray
 
 class Op:
     """Operator definition."""
@@ -216,7 +216,7 @@ class Tensor(Value):
                     array.numpy(), device=device, dtype=dtype
                 )
         else:
-            device = device if device else default_device()
+            device = device if device else cpu()
             cached_data = Tensor._array_from_numpy(array, device=device, dtype=dtype)
 
         self._init(
@@ -361,9 +361,9 @@ class Tensor(Value):
 
 
 
-
     __radd__ = __add__
     __rmul__ = __mul__
+
 
 def compute_gradient_of_variables(output_tensor, out_grad):
     """Take gradient of output node with respect to each node in node_list.
@@ -381,23 +381,7 @@ def compute_gradient_of_variables(output_tensor, out_grad):
     reverse_topo_order = list(reversed(find_topo_sort([output_tensor])))
 
     ### BEGIN YOUR SOLUTION
-    for node in reverse_topo_order:
-        if node not in node_to_output_grads_list:
-            raise RuntimeError("No outgrad found for node in topo sort")
-        node.grad = sum_node_list(node_to_output_grads_list[node])
-        if not node.requires_grad or node.is_leaf():
-            continue
-        out_grads = node.op.gradient_as_tuple(node.grad, node)
-        for input, out_grad in zip(node.inputs, out_grads):
-            if input not in node_to_output_grads_list:
-                node_to_output_grads_list[input] = []
-            node_to_output_grads_list[input].append(out_grad)
-
-    for node in reverse_topo_order:
-        if not node.is_leaf() and not isinstance(node, TensorTuple):
-            node.cached_data = None
-            node.grad = None
-            node.inputs = []
+    raise NotImplementedError()
     ### END YOUR SOLUTION
 
 
@@ -410,23 +394,14 @@ def find_topo_sort(node_list: List[Value]) -> List[Value]:
     sort.
     """
     ### BEGIN YOUR SOLUTION
-    visited = set()
-    topo_order = []
-    for node in node_list:
-        topo_sort_dfs(node, visited, topo_order)
-    return topo_order
+    raise NotImplementedError()
     ### END YOUR SOLUTION
 
 
 def topo_sort_dfs(node, visited, topo_order):
     """Post-order DFS"""
     ### BEGIN YOUR SOLUTION
-    if node in visited:
-        return
-    visited.add(node)
-    for child in node.inputs:
-        topo_sort_dfs(child, visited, topo_order)
-    topo_order.append(node)
+    raise NotImplementedError()
     ### END YOUR SOLUTION
 
 
