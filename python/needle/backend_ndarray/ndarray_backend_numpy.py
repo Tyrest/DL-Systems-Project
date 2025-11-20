@@ -2,13 +2,23 @@ import numpy as np
 
 
 __device_name__ = "numpy"
-_datatype = np.float32
-_datetype_size = np.dtype(_datatype).itemsize
+
+
+def _dtype_to_numpy(dtype: str):
+    """Convert dtype string to numpy dtype."""
+    if dtype == "float32":
+        return np.float32
+    elif dtype == "uint8":
+        return np.uint8
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
 
 
 class Array:
-    def __init__(self, size):
-        self.array = np.empty(size, dtype=np.float32)
+    def __init__(self, size, dtype="float32"):
+        np_dtype = _dtype_to_numpy(dtype)
+        self.array = np.empty(size, dtype=np_dtype)
+        self.dtype = dtype
 
     @property
     def size(self):
@@ -16,8 +26,9 @@ class Array:
 
 
 def to_numpy(a, shape, strides, offset):
+    itemsize = a.array.itemsize
     return np.lib.stride_tricks.as_strided(
-        a.array[offset:], shape, tuple([s * _datetype_size for s in strides])
+        a.array[offset:], shape, tuple([s * itemsize for s in strides])
     )
 
 
@@ -42,27 +53,44 @@ def scalar_setitem(size, val, out, shape, strides, offset):
 
 
 def ewise_add(a, b, out):
-    out.array[:] = a.array + b.array
+    # Upcast uint8 to float32 for computation
+    a_data = a.array.astype(np.float32) if a.array.dtype == np.uint8 else a.array
+    b_data = b.array.astype(np.float32) if b.array.dtype == np.uint8 else b.array
+    result = a_data + b_data
+    # Cast back to output dtype
+    out.array[:] = result.astype(out.array.dtype)
 
 
 def scalar_add(a, val, out):
-    out.array[:] = a.array + val
+    a_data = a.array.astype(np.float32) if a.array.dtype == np.uint8 else a.array
+    result = a_data + val
+    out.array[:] = result.astype(out.array.dtype)
 
 
 def ewise_mul(a, b, out):
-    out.array[:] = a.array * b.array
+    a_data = a.array.astype(np.float32) if a.array.dtype == np.uint8 else a.array
+    b_data = b.array.astype(np.float32) if b.array.dtype == np.uint8 else b.array
+    result = a_data * b_data
+    out.array[:] = result.astype(out.array.dtype)
 
 
 def scalar_mul(a, val, out):
-    out.array[:] = a.array * val
+    a_data = a.array.astype(np.float32) if a.array.dtype == np.uint8 else a.array
+    result = a_data * val
+    out.array[:] = result.astype(out.array.dtype)
 
 
 def ewise_div(a, b, out):
-    out.array[:] = a.array / b.array
+    a_data = a.array.astype(np.float32) if a.array.dtype == np.uint8 else a.array
+    b_data = b.array.astype(np.float32) if b.array.dtype == np.uint8 else b.array
+    result = a_data / b_data
+    out.array[:] = result.astype(out.array.dtype)
 
 
 def scalar_div(a, val, out):
-    out.array[:] = a.array / val
+    a_data = a.array.astype(np.float32) if a.array.dtype == np.uint8 else a.array
+    result = a_data / val
+    out.array[:] = result.astype(out.array.dtype)
 
 
 def scalar_power(a, val, out):
@@ -115,3 +143,34 @@ def reduce_max(a, out, reduce_size):
 
 def reduce_sum(a, out, reduce_size):
     out.array[:] = a.array[:].reshape(-1, reduce_size).sum(axis=1)
+
+
+def quantize_uint8(a, out, scale, zero_point):
+    """Quantize float32 array to uint8."""
+    quantized = np.round(a.array / scale) + zero_point
+    quantized = np.clip(quantized, 0, 255)
+    out.array[:] = quantized.astype(np.uint8)
+
+
+def dequantize_uint8(a, out, scale, zero_point):
+    """Dequantize uint8 array to float32."""
+    dequantized = scale * (a.array.astype(np.float32) - zero_point)
+    out.array[:] = dequantized
+
+
+def matmul_uint8(a, b, out, m, n, p, scale_a, zero_a, scale_b, zero_b):
+    """Quantized matrix multiplication.
+    
+    Performs integer matrix multiplication and rescales the result.
+    Formula: (scale_a * scale_b) * ((a_int - zero_a) @ (b_int - zero_b))
+    """
+    # Convert to int32 for accumulation
+    a_int = a.array.reshape(m, n).astype(np.int32) - zero_a
+    b_int = b.array.reshape(n, p).astype(np.int32) - zero_b
+    
+    # Integer matmul
+    result_int = a_int @ b_int
+    
+    # Rescale to float32
+    result_float = (scale_a * scale_b) * result_int.astype(np.float32)
+    out.array[:] = result_float.reshape(-1)

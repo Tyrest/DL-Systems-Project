@@ -84,19 +84,59 @@ class Linear(Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self.quantized = False
+        self._quantized_weight = None
+        self._quantized_bias = None
 
         ### BEGIN YOUR SOLUTION
         self.weight = Parameter(init.kaiming_uniform(in_features, out_features, device=device, dtype=dtype))
         if bias:
             self.bias = Parameter(init.kaiming_uniform(out_features, 1, device=device, dtype=dtype).reshape((1, out_features)))
         ### END YOUR SOLUTION
+    
+    def quantize_weights(self):
+        """Quantize weights to uint8 for inference."""
+        if self.quantized:
+            return
+        
+        # Quantize weight
+        self._quantized_weight = self.weight.data.quantize_uint8()
+        
+        # Quantize bias if it exists
+        if hasattr(self, 'bias'):
+            self._quantized_bias = self.bias.data.quantize_uint8()
+        
+        self.quantized = True
+    
+    def dequantize_weights(self):
+        """Dequantize weights back to float32."""
+        self.quantized = False
+        self._quantized_weight = None
+        self._quantized_bias = None
 
     def forward(self, X: Tensor) -> Tensor:
         ### BEGIN YOUR SOLUTION
-        X = ops.matmul(X, self.weight)
-        if hasattr(self, 'bias'):
-            X = X + ops.broadcast_to(self.bias, X.shape)
-        return X
+        # Use quantized path if in eval mode and weights are quantized
+        if not self.training and self.quantized and self._quantized_weight is not None:
+            # Quantize activation
+            X_quant = X.quantize_uint8()
+            # Perform quantized matmul (will be done in uint8 if both are quantized)
+            out = ops.matmul(X_quant, self._quantized_weight)
+            # Result is in float32 after uint8 matmul
+            if hasattr(self, 'bias'):
+                # Dequantize bias if necessary
+                if self._quantized_bias is not None:
+                    bias_float = self._quantized_bias.dequantize()
+                else:
+                    bias_float = self.bias
+                out = out + ops.broadcast_to(bias_float, out.shape)
+            return out
+        else:
+            # Normal float32 path
+            X = ops.matmul(X, self.weight)
+            if hasattr(self, 'bias'):
+                X = X + ops.broadcast_to(self.bias, X.shape)
+            return X
         ### END YOUR SOLUTION
 
 

@@ -13,19 +13,47 @@ namespace cuda {
 
 #define TILE 4
 typedef float scalar_t;
-const size_t ELEM_SIZE = sizeof(scalar_t);
+
+// Dtype enumeration
+enum class DType {
+  Float32 = 0,
+  UInt8 = 1
+};
+
+inline size_t dtype_size(DType dtype) {
+  switch (dtype) {
+    case DType::Float32: return sizeof(float);
+    case DType::UInt8: return sizeof(uint8_t);
+    default: return sizeof(float);
+  }
+}
 
 struct CudaArray {
-  CudaArray(const size_t size) {
-    cudaError_t err = cudaMalloc(&ptr, size * ELEM_SIZE);
+  CudaArray(const size_t size, DType dtype = DType::Float32) 
+    : dtype(dtype), size(size), elem_size(dtype_size(dtype)) {
+    cudaError_t err = cudaMalloc(&data, size * elem_size);
     if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
-    this->size = size;
   }
-  ~CudaArray() { cudaFree(ptr); }
-  size_t ptr_as_int() { return (size_t)ptr; }
+  ~CudaArray() { cudaFree(data); }
+  size_t ptr_as_int() { return (size_t)data; }
   
-  scalar_t* ptr;
+  // Typed pointer accessors
+  float* ptr_float() { return reinterpret_cast<float*>(data); }
+  const float* ptr_float() const { return reinterpret_cast<const float*>(data); }
+  uint8_t* ptr_uint8() { return reinterpret_cast<uint8_t*>(data); }
+  const uint8_t* ptr_uint8() const { return reinterpret_cast<const uint8_t*>(data); }
+  
+  void* data;
   size_t size;
+  DType dtype;
+  size_t elem_size;
+  
+  // Legacy compatibility
+  scalar_t* ptr;  // For backward compatibility
+  
+  void update_ptr() {
+    ptr = ptr_float();
+  }
 };
 
 struct CudaDims {
@@ -498,6 +526,104 @@ void ReduceSum(const CudaArray& a, CudaArray* out, size_t reduce_size) {
   /// END SOLUTION
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Quantization operations
+////////////////////////////////////////////////////////////////////////////////
+
+__global__ void QuantizeUint8Kernel(const float* a, uint8_t* out, size_t size,
+                                    float scale, int32_t zero_point) {
+  size_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (gid < size) {
+    float quantized = roundf(a[gid] / scale) + zero_point;
+    quantized = fmaxf(0.0f, fminf(255.0f, quantized));
+    out[gid] = static_cast<uint8_t>(quantized);
+  }
+}
+
+void QuantizeUint8(const CudaArray& a, CudaArray* out, float scale, int32_t zero_point) {
+  /**
+   * Quantize float32 array to uint8 array on GPU.
+   * 
+   * Args:
+   *   a: input float32 array
+   *   out: output uint8 array
+   *   scale: quantization scale
+   *   zero_point: quantization zero point
+   */
+  CudaDims dim = CudaOneDim(a.size);
+  QuantizeUint8Kernel<<<dim.grid, dim.block>>>(a.ptr_float(), out->ptr_uint8(), 
+                                                a.size, scale, zero_point);
+}
+
+__global__ void DequantizeUint8Kernel(const uint8_t* a, float* out, size_t size,
+                                      float scale, int32_t zero_point) {
+  size_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (gid < size) {
+    out[gid] = scale * (static_cast<float>(a[gid]) - zero_point);
+  }
+}
+
+void DequantizeUint8(const CudaArray& a, CudaArray* out, float scale, int32_t zero_point) {
+  /**
+   * Dequantize uint8 array back to float32 array on GPU.
+   * 
+   * Args:
+   *   a: input uint8 array
+   *   out: output float32 array
+   *   scale: quantization scale
+   *   zero_point: quantization zero point
+   */
+  CudaDims dim = CudaOneDim(a.size);
+  DequantizeUint8Kernel<<<dim.grid, dim.block>>>(a.ptr_uint8(), out->ptr_float(),
+                                                   a.size, scale, zero_point);
+}
+
+__global__ void MatmulUint8Kernel(const uint8_t* A, const uint8_t* B, float* out,
+                                  uint32_t M, uint32_t N, uint32_t P,
+                                  float scale_a, int32_t zero_a,
+                                  float scale_b, int32_t zero_b) {
+  /**
+   * Quantized matrix multiplication kernel.
+   * Each thread computes one output element using int32 accumulation.
+   */
+  size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  
+  if (row < M && col < P) {
+    int32_t acc = 0;
+    for (size_t k = 0; k < N; k++) {
+      int32_t a_val = static_cast<int32_t>(A[row * N + k]) - zero_a;
+      int32_t b_val = static_cast<int32_t>(B[k * P + col]) - zero_b;
+      acc += a_val * b_val;
+    }
+    float scale_out = scale_a * scale_b;
+    out[row * P + col] = scale_out * static_cast<float>(acc);
+  }
+}
+
+void MatmulUint8(const CudaArray& a, const CudaArray& b, CudaArray* out,
+                 uint32_t M, uint32_t N, uint32_t P,
+                 float scale_a, int32_t zero_a,
+                 float scale_b, int32_t zero_b) {
+  /**
+   * Quantized matrix multiplication for uint8 inputs on GPU.
+   * 
+   * Args:
+   *   a: uint8 matrix of size M x N
+   *   b: uint8 matrix of size N x P
+   *   out: float32 output matrix of size M x P
+   *   M, N, P: matrix dimensions
+   *   scale_a, zero_a: quantization parameters for a
+   *   scale_b, zero_b: quantization parameters for b
+   */
+  // Use 2D grid for better performance
+  dim3 block(16, 16);
+  dim3 grid((P + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+  
+  MatmulUint8Kernel<<<grid, block>>>(a.ptr_uint8(), b.ptr_uint8(), out->ptr_float(),
+                                      M, N, P, scale_a, zero_a, scale_b, zero_b);
+}
+
 }  // namespace cuda
 }  // namespace needle
 
@@ -509,8 +635,20 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
   m.attr("__device_name__") = "cuda";
   m.attr("__tile_size__") = TILE;
 
+  py::enum_<DType>(m, "DType")
+      .value("float32", DType::Float32)
+      .value("uint8", DType::UInt8);
+
   py::class_<CudaArray>(m, "Array")
-      .def(py::init<size_t>(), py::return_value_policy::take_ownership)
+      .def(py::init([](size_t size, const std::string& dtype) {
+        DType dt = DType::Float32;
+        if (dtype == "float32") dt = DType::Float32;
+        else if (dtype == "uint8") dt = DType::UInt8;
+        else throw std::runtime_error("Unsupported dtype: " + dtype);
+        auto* arr = new CudaArray(size, dt);
+        arr->update_ptr();
+        return arr;
+      }), py::arg("size"), py::arg("dtype") = "float32", py::return_value_policy::take_ownership)
       .def_readonly("size", &CudaArray::size)
       .def("ptr", &CudaArray::ptr_as_int);
 
@@ -518,24 +656,50 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
   m.def("to_numpy", [](const CudaArray& a, std::vector<size_t> shape, std::vector<size_t> strides,
                        size_t offset) {
     std::vector<size_t> numpy_strides = strides;
-    std::transform(numpy_strides.begin(), numpy_strides.end(), numpy_strides.begin(),
-                   [](size_t& c) { return c * ELEM_SIZE; });
+    
+    if (a.dtype == DType::Float32) {
+      std::transform(numpy_strides.begin(), numpy_strides.end(), numpy_strides.begin(),
+                     [](size_t& c) { return c * sizeof(float); });
 
-    // copy memory to host
-    scalar_t* host_ptr = (scalar_t*)std::malloc(a.size * ELEM_SIZE);
-    if (host_ptr == 0) throw std::bad_alloc();
-    cudaError_t err = cudaMemcpy(host_ptr, a.ptr, a.size * ELEM_SIZE, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+      // copy memory to host
+      float* host_ptr = (float*)std::malloc(a.size * sizeof(float));
+      if (host_ptr == 0) throw std::bad_alloc();
+      cudaError_t err = cudaMemcpy(host_ptr, a.data, a.size * sizeof(float), cudaMemcpyDeviceToHost);
+      if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
 
-    // return numpy array
-    py::capsule deallocate_buffer(host_ptr, [](void* p) { free(p); });
-    return py::array_t<scalar_t>(shape, numpy_strides, host_ptr + offset, deallocate_buffer);
+      // return numpy array
+      py::capsule deallocate_buffer(host_ptr, [](void* p) { free(p); });
+      return py::array_t<float>(shape, numpy_strides, host_ptr + offset, deallocate_buffer);
+    } else if (a.dtype == DType::UInt8) {
+      std::transform(numpy_strides.begin(), numpy_strides.end(), numpy_strides.begin(),
+                     [](size_t& c) { return c * sizeof(uint8_t); });
+
+      // copy memory to host
+      uint8_t* host_ptr = (uint8_t*)std::malloc(a.size * sizeof(uint8_t));
+      if (host_ptr == 0) throw std::bad_alloc();
+      cudaError_t err = cudaMemcpy(host_ptr, a.data, a.size * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+      if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+
+      // return numpy array
+      py::capsule deallocate_buffer(host_ptr, [](void* p) { free(p); });
+      return py::array_t<uint8_t>(shape, numpy_strides, host_ptr + offset, deallocate_buffer);
+    } else {
+      throw std::runtime_error("Unsupported dtype");
+    }
   });
 
   // copy numpy array to GPU
-  m.def("from_numpy", [](py::array_t<scalar_t> a, CudaArray* out) {
-    cudaError_t err =
-        cudaMemcpy(out->ptr, a.request().ptr, out->size * ELEM_SIZE, cudaMemcpyHostToDevice);
+  m.def("from_numpy", [](py::array a, CudaArray* out) {
+    cudaError_t err;
+    if (out->dtype == DType::Float32) {
+      auto arr = a.cast<py::array_t<float>>();
+      err = cudaMemcpy(out->data, arr.request().ptr, out->size * sizeof(float), cudaMemcpyHostToDevice);
+    } else if (out->dtype == DType::UInt8) {
+      auto arr = a.cast<py::array_t<uint8_t>>();
+      err = cudaMemcpy(out->data, arr.request().ptr, out->size * sizeof(uint8_t), cudaMemcpyHostToDevice);
+    } else {
+      throw std::runtime_error("Unsupported dtype");
+    }
     if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
   });
 
@@ -567,4 +731,9 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+  
+  // Quantization operations
+  m.def("quantize_uint8", QuantizeUint8);
+  m.def("dequantize_uint8", DequantizeUint8);
+  m.def("matmul_uint8", MatmulUint8);
 }

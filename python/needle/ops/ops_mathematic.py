@@ -256,6 +256,9 @@ def summation(a, axes=None, keepdims=False):
 
 
 class MatMul(TensorOp):
+    """Matrix multiplication operation. Marked as quantizable."""
+    quantizable = True
+    
     def compute(self, a, b):
         ### BEGIN YOUR SOLUTION
         return a @ b

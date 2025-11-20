@@ -20,6 +20,9 @@ NDArray = numpy.ndarray
 
 class Op:
     """Operator definition."""
+    
+    # Flag to indicate if this op can work with quantized uint8 inputs
+    quantizable = False
 
     def __call__(self, *args):
         raise NotImplementedError()
@@ -102,10 +105,22 @@ class Value:
         # avoid recomputation
         if self.cached_data is not None:
             return self.cached_data
+        
+        # Get input data
+        input_data = [x.realize_cached_data() for x in self.inputs]
+        
+        # Auto-dequantize uint8 inputs for non-quantizable ops
+        if hasattr(self.op, 'quantizable') and not self.op.quantizable:
+            # Dequantize any uint8 inputs
+            input_data = [
+                x.dequantize() if (hasattr(x, 'dtype') and x.dtype == 'uint8' and 
+                                  hasattr(x, 'quant_params') and x.quant_params is not None)
+                else x
+                for x in input_data
+            ]
+        
         # note: data implicitly calls realized cached data
-        self.cached_data = self.op.compute(
-            *[x.realize_cached_data() for x in self.inputs]
-        )
+        self.cached_data = self.op.compute(*input_data)
         return self.cached_data
 
     def is_leaf(self):
@@ -348,6 +363,61 @@ class Tensor(Value):
 
     def broadcast_to(self, shape):
         return needle.ops.BroadcastTo(shape)(self)
+    
+    ### Quantization methods
+    def astype(self, dtype: str) -> "Tensor":
+        """Convert tensor to a different dtype.
+        
+        Args:
+            dtype: Target dtype ('float32' or 'uint8')
+        
+        Returns:
+            New Tensor with the specified dtype
+        """
+        data = self.realize_cached_data()
+        if hasattr(data, 'astype'):
+            new_data = data.astype(dtype)
+            return Tensor.make_const(new_data, requires_grad=False)
+        else:
+            raise ValueError(f"Cannot convert dtype for this tensor type")
+    
+    def quantize_uint8(self, scale=None, zero_point=None) -> "Tensor":
+        """Quantize float32 tensor to uint8.
+        
+        Args:
+            scale: Quantization scale (computed from data if None)
+            zero_point: Quantization zero-point (computed from data if None)
+        
+        Returns:
+            Quantized uint8 Tensor (detached from computation graph)
+        """
+        data = self.realize_cached_data()
+        if hasattr(data, 'quantize_uint8'):
+            quantized_data = data.quantize_uint8(scale, zero_point)
+            return Tensor.make_const(quantized_data, requires_grad=False)
+        else:
+            raise ValueError("Quantization not supported for this tensor type")
+    
+    def dequantize(self) -> "Tensor":
+        """Dequantize uint8 tensor back to float32.
+        
+        Returns:
+            Dequantized float32 Tensor
+        """
+        data = self.realize_cached_data()
+        if hasattr(data, 'dequantize'):
+            dequantized_data = data.dequantize()
+            return Tensor.make_const(dequantized_data, requires_grad=self.requires_grad)
+        else:
+            raise ValueError("Dequantization not supported for this tensor type")
+    
+    @property
+    def quant_params(self):
+        """Return quantization parameters if this is a quantized tensor."""
+        data = self.realize_cached_data()
+        if hasattr(data, 'quant_params'):
+            return data.quant_params
+        return None
 
     def reshape(self, shape):
         return needle.ops.Reshape(shape)(self)

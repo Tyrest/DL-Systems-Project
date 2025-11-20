@@ -5,6 +5,8 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <cstdint>
+#include <algorithm>
 
 namespace needle {
 namespace cpu {
@@ -12,8 +14,20 @@ namespace cpu {
 #define ALIGNMENT 256
 #define TILE 8
 typedef float scalar_t;
-const size_t ELEM_SIZE = sizeof(scalar_t);
 
+// Dtype enumeration
+enum class DType {
+  Float32 = 0,
+  UInt8 = 1
+};
+
+inline size_t dtype_size(DType dtype) {
+  switch (dtype) {
+    case DType::Float32: return sizeof(float);
+    case DType::UInt8: return sizeof(uint8_t);
+    default: throw std::runtime_error("Unknown dtype");
+  }
+}
 
 /**
  * This is a utility structure for maintaining an array aligned to ALIGNMENT boundaries in
@@ -21,15 +35,31 @@ const size_t ELEM_SIZE = sizeof(scalar_t);
  * here by default.
  */
 struct AlignedArray {
-  AlignedArray(const size_t size) {
-    int ret = posix_memalign((void**)&ptr, ALIGNMENT, size * ELEM_SIZE);
+  AlignedArray(const size_t size, DType dtype = DType::Float32) 
+    : dtype(dtype), size(size), elem_size(dtype_size(dtype)) {
+    int ret = posix_memalign((void**)&data, ALIGNMENT, size * elem_size);
     if (ret != 0) throw std::bad_alloc();
-    this->size = size;
   }
-  ~AlignedArray() { free(ptr); }
-  size_t ptr_as_int() {return (size_t)ptr; }
-  scalar_t* ptr;
+  ~AlignedArray() { free(data); }
+  size_t ptr_as_int() {return (size_t)data; }
+  
+  // Typed pointer accessors
+  float* ptr_float() { return reinterpret_cast<float*>(data); }
+  const float* ptr_float() const { return reinterpret_cast<const float*>(data); }
+  uint8_t* ptr_uint8() { return reinterpret_cast<uint8_t*>(data); }
+  const uint8_t* ptr_uint8() const { return reinterpret_cast<const uint8_t*>(data); }
+  
+  void* data;
   size_t size;
+  DType dtype;
+  size_t elem_size;
+  
+  // Legacy compatibility
+  scalar_t* ptr;  // For backward compatibility, will point to data
+  
+  void update_ptr() {
+    ptr = ptr_float();
+  }
 };
 
 
@@ -38,8 +68,17 @@ void Fill(AlignedArray* out, scalar_t val) {
   /**
    * Fill the values of an aligned array with val
    */
-  for (int i = 0; i < out->size; i++) {
-    out->ptr[i] = val;
+  if (out->dtype == DType::Float32) {
+    float* ptr = out->ptr_float();
+    for (size_t i = 0; i < out->size; i++) {
+      ptr[i] = val;
+    }
+  } else if (out->dtype == DType::UInt8) {
+    uint8_t* ptr = out->ptr_uint8();
+    uint8_t val_u8 = static_cast<uint8_t>(std::round(std::max(0.0f, std::min(255.0f, val))));
+    for (size_t i = 0; i < out->size; i++) {
+      ptr[i] = val_u8;
+    }
   }
 }
 
@@ -75,10 +114,21 @@ void Compact(const AlignedArray& a, AlignedArray* out, std::vector<int32_t> shap
    */
   /// BEGIN SOLUTION
   size_t count = 0;
-  IndexIterator(shape, strides, 0, offset, 
-                [&](size_t idx, size_t compact_idx) {
-                  out->ptr[compact_idx] = a.ptr[idx];
-                }, count);
+  if (a.dtype == DType::Float32) {
+    const float* a_ptr = a.ptr_float();
+    float* out_ptr = out->ptr_float();
+    IndexIterator(shape, strides, 0, offset, 
+                  [&](size_t idx, size_t compact_idx) {
+                    out_ptr[compact_idx] = a_ptr[idx];
+                  }, count);
+  } else if (a.dtype == DType::UInt8) {
+    const uint8_t* a_ptr = a.ptr_uint8();
+    uint8_t* out_ptr = out->ptr_uint8();
+    IndexIterator(shape, strides, 0, offset, 
+                  [&](size_t idx, size_t compact_idx) {
+                    out_ptr[compact_idx] = a_ptr[idx];
+                  }, count);
+  }
   /// END SOLUTION
 }
 
@@ -96,10 +146,21 @@ void EwiseSetitem(const AlignedArray& a, AlignedArray* out, std::vector<int32_t>
    */
   /// BEGIN SOLUTION
   size_t count = 0;
-  IndexIterator(shape, strides, 0, offset,
-                [&](size_t idx, size_t compact_idx) {
-                  out->ptr[idx] = a.ptr[compact_idx];
-                }, count);
+  if (a.dtype == DType::Float32) {
+    const float* a_ptr = a.ptr_float();
+    float* out_ptr = out->ptr_float();
+    IndexIterator(shape, strides, 0, offset,
+                  [&](size_t idx, size_t compact_idx) {
+                    out_ptr[idx] = a_ptr[compact_idx];
+                  }, count);
+  } else if (a.dtype == DType::UInt8) {
+    const uint8_t* a_ptr = a.ptr_uint8();
+    uint8_t* out_ptr = out->ptr_uint8();
+    IndexIterator(shape, strides, 0, offset,
+                  [&](size_t idx, size_t compact_idx) {
+                    out_ptr[idx] = a_ptr[compact_idx];
+                  }, count);
+  }
   /// END SOLUTION
 }
 
@@ -121,10 +182,20 @@ void ScalarSetitem(const size_t size, scalar_t val, AlignedArray* out, std::vect
 
   /// BEGIN SOLUTION
   size_t count = 0;
-  IndexIterator(shape, strides, 0, offset,
-                [&](size_t idx, size_t compact_idx) {
-                  out->ptr[idx] = val;
-                }, count);
+  if (out->dtype == DType::Float32) {
+    float* out_ptr = out->ptr_float();
+    IndexIterator(shape, strides, 0, offset,
+                  [&](size_t idx, size_t compact_idx) {
+                    out_ptr[idx] = val;
+                  }, count);
+  } else if (out->dtype == DType::UInt8) {
+    uint8_t* out_ptr = out->ptr_uint8();
+    uint8_t val_u8 = static_cast<uint8_t>(std::round(std::max(0.0f, std::min(255.0f, val))));
+    IndexIterator(shape, strides, 0, offset,
+                  [&](size_t idx, size_t compact_idx) {
+                    out_ptr[idx] = val_u8;
+                  }, count);
+  }
   /// END SOLUTION
 }
 
@@ -363,6 +434,88 @@ void ReduceSum(const AlignedArray& a, AlignedArray* out, size_t reduce_size) {
   /// END SOLUTION
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Quantization operations
+////////////////////////////////////////////////////////////////////////////////
+
+void QuantizeUint8(const AlignedArray& a, AlignedArray* out, float scale, int32_t zero_point) {
+  /**
+   * Quantize float32 array to uint8 array.
+   * Formula: q = clip(round(x / scale) + zero_point, 0, 255)
+   * 
+   * Args:
+   *   a: input float32 array
+   *   out: output uint8 array
+   *   scale: quantization scale
+   *   zero_point: quantization zero point
+   */
+  const float* in_ptr = a.ptr_float();
+  uint8_t* out_ptr = out->ptr_uint8();
+  
+  for (size_t i = 0; i < a.size; i++) {
+    float quantized = std::round(in_ptr[i] / scale) + zero_point;
+    quantized = std::max(0.0f, std::min(255.0f, quantized));
+    out_ptr[i] = static_cast<uint8_t>(quantized);
+  }
+}
+
+void DequantizeUint8(const AlignedArray& a, AlignedArray* out, float scale, int32_t zero_point) {
+  /**
+   * Dequantize uint8 array back to float32 array.
+   * Formula: x = scale * (q - zero_point)
+   * 
+   * Args:
+   *   a: input uint8 array
+   *   out: output float32 array
+   *   scale: quantization scale
+   *   zero_point: quantization zero point
+   */
+  const uint8_t* in_ptr = a.ptr_uint8();
+  float* out_ptr = out->ptr_float();
+  
+  for (size_t i = 0; i < a.size; i++) {
+    out_ptr[i] = scale * (static_cast<float>(in_ptr[i]) - zero_point);
+  }
+}
+
+void MatmulUint8(const AlignedArray& a, const AlignedArray& b, AlignedArray* out,
+                 uint32_t m, uint32_t n, uint32_t p,
+                 float scale_a, int32_t zero_a,
+                 float scale_b, int32_t zero_b) {
+  /**
+   * Quantized matrix multiplication for uint8 inputs.
+   * Performs integer matmul with int32 accumulation, then rescales to float32.
+   * Formula: C_float = (scale_a * scale_b) * ((A_int - zero_a) @ (B_int - zero_b))
+   * 
+   * Args:
+   *   a: uint8 matrix of size m x n
+   *   b: uint8 matrix of size n x p
+   *   out: float32 output matrix of size m x p
+   *   m, n, p: matrix dimensions
+   *   scale_a, zero_a: quantization parameters for a
+   *   scale_b, zero_b: quantization parameters for b
+   */
+  const uint8_t* a_ptr = a.ptr_uint8();
+  const uint8_t* b_ptr = b.ptr_uint8();
+  float* out_ptr = out->ptr_float();
+  
+  const float scale_out = scale_a * scale_b;
+  
+  for (size_t i = 0; i < m; i++) {
+    for (size_t j = 0; j < p; j++) {
+      // Use int32 for accumulation to avoid overflow
+      int32_t acc = 0;
+      for (size_t k = 0; k < n; k++) {
+        int32_t a_val = static_cast<int32_t>(a_ptr[i * n + k]) - zero_a;
+        int32_t b_val = static_cast<int32_t>(b_ptr[k * p + j]) - zero_b;
+        acc += a_val * b_val;
+      }
+      // Convert to float32 with rescaling
+      out_ptr[i * p + j] = scale_out * static_cast<float>(acc);
+    }
+  }
+}
+
 }  // namespace cpu
 }  // namespace needle
 
@@ -374,8 +527,20 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
   m.attr("__device_name__") = "cpu";
   m.attr("__tile_size__") = TILE;
 
+  py::enum_<DType>(m, "DType")
+      .value("float32", DType::Float32)
+      .value("uint8", DType::UInt8);
+
   py::class_<AlignedArray>(m, "Array")
-      .def(py::init<size_t>(), py::return_value_policy::take_ownership)
+      .def(py::init([](size_t size, const std::string& dtype) {
+        DType dt = DType::Float32;
+        if (dtype == "float32") dt = DType::Float32;
+        else if (dtype == "uint8") dt = DType::UInt8;
+        else throw std::runtime_error("Unsupported dtype: " + dtype);
+        auto* arr = new AlignedArray(size, dt);
+        arr->update_ptr();
+        return arr;
+      }), py::arg("size"), py::arg("dtype") = "float32", py::return_value_policy::take_ownership)
       .def("ptr", &AlignedArray::ptr_as_int)
       .def_readonly("size", &AlignedArray::size);
 
@@ -384,14 +549,28 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
   m.def("to_numpy", [](const AlignedArray& a, std::vector<size_t> shape,
                        std::vector<size_t> strides, size_t offset) {
     std::vector<size_t> numpy_strides = strides;
-    std::transform(numpy_strides.begin(), numpy_strides.end(), numpy_strides.begin(),
-                   [](size_t& c) { return c * ELEM_SIZE; });
-    return py::array_t<scalar_t>(shape, numpy_strides, a.ptr + offset);
+    if (a.dtype == DType::Float32) {
+      std::transform(numpy_strides.begin(), numpy_strides.end(), numpy_strides.begin(),
+                     [](size_t& c) { return c * sizeof(float); });
+      return py::array_t<float>(shape, numpy_strides, a.ptr_float() + offset);
+    } else if (a.dtype == DType::UInt8) {
+      std::transform(numpy_strides.begin(), numpy_strides.end(), numpy_strides.begin(),
+                     [](size_t& c) { return c * sizeof(uint8_t); });
+      return py::array_t<uint8_t>(shape, numpy_strides, a.ptr_uint8() + offset);
+    } else {
+      throw std::runtime_error("Unsupported dtype");
+    }
   });
 
   // convert from numpy (with copying)
-  m.def("from_numpy", [](py::array_t<scalar_t> a, AlignedArray* out) {
-    std::memcpy(out->ptr, a.request().ptr, out->size * ELEM_SIZE);
+  m.def("from_numpy", [](py::array a, AlignedArray* out) {
+    if (out->dtype == DType::Float32) {
+      auto arr = a.cast<py::array_t<float>>();
+      std::memcpy(out->data, arr.request().ptr, out->size * sizeof(float));
+    } else if (out->dtype == DType::UInt8) {
+      auto arr = a.cast<py::array_t<uint8_t>>();
+      std::memcpy(out->data, arr.request().ptr, out->size * sizeof(uint8_t));
+    }
   });
 
   m.def("fill", Fill);
@@ -423,4 +602,9 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+  
+  // Quantization operations
+  m.def("quantize_uint8", QuantizeUint8);
+  m.def("dequantize_uint8", DequantizeUint8);
+  m.def("matmul_uint8", MatmulUint8);
 }
