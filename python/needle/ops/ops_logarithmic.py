@@ -5,7 +5,7 @@ from ..autograd import TensorTuple, TensorTupleOp
 
 from .ops_mathematic import *
 
-import numpy as array_api
+from ..backend_selection import array_api, BACKEND 
 
 class LogSoftmax(TensorOp):
     def compute(self, Z: NDArray) -> NDArray:
@@ -29,13 +29,20 @@ def logsoftmax(a: Tensor) -> Tensor:
 
 class LogSumExp(TensorOp):
     def __init__(self, axes: Optional[tuple] = None) -> None:
+        if axes is not None and type(axes) is int:
+            axes = (axes,)
         self.axes = axes
 
     def compute(self, Z: NDArray) -> NDArray:
         ### BEGIN YOUR SOLUTION
-        max_z = array_api.max(Z, axis=self.axes, keepdims=True)
-        sum_exp = array_api.sum(array_api.exp(Z - max_z), axis=self.axes)
-        return array_api.log(sum_exp) + array_api.squeeze(max_z, axis=self.axes)
+        max_z = Z.max(axis=self.axes, keepdims=True)
+        reshape_shape = [
+            1 if self.axes is None or i in self.axes else Z.shape[i]
+            for i in range(len(Z.shape))
+        ]
+        max_z_broadcasted = max_z.reshape(reshape_shape).broadcast_to(Z.shape)
+        sum_exp = array_api.sum(array_api.exp(Z - max_z_broadcasted), axis=self.axes)
+        return array_api.log(sum_exp) + max_z.reshape(sum_exp.shape)
         ### END YOUR SOLUTION
 
     def gradient(self, out_grad: Tensor, node: Tensor):
