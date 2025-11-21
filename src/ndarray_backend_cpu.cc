@@ -338,9 +338,9 @@ inline void AlignedDot(const float* __restrict__ a,
    *   out: compact 2D array of size TILE x TILE to write to
    */
 
-  a = (const float*)__builtin_assume_aligned(a, TILE * ELEM_SIZE);
-  b = (const float*)__builtin_assume_aligned(b, TILE * ELEM_SIZE);
-  out = (float*)__builtin_assume_aligned(out, TILE * ELEM_SIZE);
+  a = (const float*)__builtin_assume_aligned(a, TILE * sizeof(float));
+  b = (const float*)__builtin_assume_aligned(b, TILE * sizeof(float));
+  out = (float*)__builtin_assume_aligned(out, TILE * sizeof(float));
 
   /// BEGIN SOLUTION
   for (size_t i = 0; i < TILE; i++) {
@@ -545,9 +545,9 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
       .def_readonly("size", &AlignedArray::size);
 
   // return numpy array (with copying for simplicity, otherwise garbage
-  // collection is a pain)
+  // return numpy array (with copying)
   m.def("to_numpy", [](const AlignedArray& a, std::vector<size_t> shape,
-                       std::vector<size_t> strides, size_t offset) {
+                       std::vector<size_t> strides, size_t offset) -> py::object {
     std::vector<size_t> numpy_strides = strides;
     if (a.dtype == DType::Float32) {
       std::transform(numpy_strides.begin(), numpy_strides.end(), numpy_strides.begin(),

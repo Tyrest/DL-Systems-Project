@@ -654,7 +654,7 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
 
   // return numpy array, copying from CPU
   m.def("to_numpy", [](const CudaArray& a, std::vector<size_t> shape, std::vector<size_t> strides,
-                       size_t offset) {
+                       size_t offset) -> py::object {
     std::vector<size_t> numpy_strides = strides;
     
     if (a.dtype == DType::Float32) {

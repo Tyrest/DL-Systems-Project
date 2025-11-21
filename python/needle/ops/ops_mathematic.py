@@ -8,10 +8,8 @@ from ..autograd import Op, Tensor, Value, TensorOp
 from ..autograd import TensorTuple, TensorTupleOp
 import numpy
 
-# NOTE: we will import numpy as the array_api
-# as the backend for our computations, this line will change in later homeworks
-
-import numpy as array_api
+from .. import backend_selection
+array_api = backend_selection.array_api
 
 
 class EWiseAdd(TensorOp):
@@ -161,7 +159,7 @@ class Transpose(TensorOp):
             )
         else:
             new_axes[-1], new_axes[-2] = new_axes[-2], new_axes[-1]
-        return array_api.transpose(a, new_axes)
+        return a.permute(tuple(new_axes))
         ### END YOUR SOLUTION
 
     def gradient(self, out_grad, node):
@@ -180,7 +178,7 @@ class Reshape(TensorOp):
 
     def compute(self, a):
         ### BEGIN YOUR SOLUTION
-        return array_api.reshape(a, self.shape)
+        return a.compact().reshape(self.shape)
         ### END YOUR SOLUTION
 
     def gradient(self, out_grad, node):
@@ -341,7 +339,7 @@ class ReLU(TensorOp):
 
     def gradient(self, out_grad, node):
         ### BEGIN YOUR SOLUTION
-        return out_grad * Tensor(node.inputs[0].realize_cached_data() > 0)
+        return out_grad * Tensor(node.inputs[0].realize_cached_data() > 0, device=out_grad.device, dtype=out_grad.dtype)
         ### END YOUR SOLUTION
 
 

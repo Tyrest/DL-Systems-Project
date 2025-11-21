@@ -1,21 +1,22 @@
 """Core data structures."""
 import needle
-from .backend_numpy import Device, cpu, all_devices
 from typing import List, Optional, NamedTuple, Tuple, Union
 from collections import namedtuple, defaultdict
 import numpy
 
 from needle import init
+from . import backend_selection
 
 # needle version
 LAZY_MODE = False
 TENSOR_COUNTER = 0
 
-# NOTE: we will import numpy as the array_api
-# as the backend for our computations, this line will change in later homeworks
-
-import numpy as array_api
-NDArray = numpy.ndarray
+# Use the backend selection system
+array_api = backend_selection.array_api
+NDArray = backend_selection.NDArray
+Device = backend_selection.Device
+cpu = backend_selection.cpu
+all_devices = backend_selection.all_devices
 
 
 class Op:
@@ -242,9 +243,12 @@ class Tensor(Value):
 
     @staticmethod
     def _array_from_numpy(numpy_array, device, dtype):
-        if array_api is numpy:
+        if hasattr(array_api, 'NDArray'):
+            # Using needle backend
+            return array_api.array(numpy_array, device=device, dtype=dtype)
+        else:
+            # Using numpy backend
             return numpy.array(numpy_array, dtype=dtype)
-        return array_api.array(numpy_array, device=device, dtype=dtype)
 
     @staticmethod
     def make_from_op(op: Op, inputs: List["Value"]):
@@ -379,7 +383,7 @@ class Tensor(Value):
             new_data = data.astype(dtype)
             return Tensor.make_const(new_data, requires_grad=False)
         else:
-            raise ValueError(f"Cannot convert dtype for this tensor type")
+            raise ValueError("Cannot convert dtype for this tensor type")
     
     def quantize_uint8(self, scale=None, zero_point=None) -> "Tensor":
         """Quantize float32 tensor to uint8.
