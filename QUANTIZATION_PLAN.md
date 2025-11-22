@@ -150,17 +150,18 @@ This plan outlines the steps to introduce `int8` data types and quantization sup
     *   Perform matrix multiplication with `int8` tensors.
     *   Compare the result with standard `float32` matmul.
     *   Show automatic fallback for unsupported ops (e.g., `ReLU` on `int8` input).
-*   **Neural Network Demo (Dynamic Quantization)**:
-    *   Define a simple MLP or Linear model.
-    *   Load pre-trained weights (or train a small model on MNIST/CIFAR).
-    *   Enable dynamic quantization on the model.
-    *   Run inference on a sample batch and compare output/accuracy with the float model.
-*   **Neural Network Demo (Static Quantization)**:
-    *   Define the same model structure.
-    *   **Calibration Step**: Run the `calibrate()` function with a few batches of data.
-    *   Visualize the collected statistics (min/max ranges) from the observers.
-    *   **Inference**: Switch to static quantized mode.
-    *   Run inference and compare accuracy/output with float and dynamic quantized models.
+*   **Neural Network Demo (Dynamic & Static Quantization)**:
+    *   **Architectures**:
+        *   **MLP**: Simple fully connected network on MNIST.
+        *   **CNN**: ResNet9 on CIFAR-10.
+        *   **RNN/LSTM**: Language Model on Penn Treebank.
+        *   **Transformer**: Sequence-to-sequence or language model task.
+    *   For each architecture:
+        *   Load pre-trained weights.
+        *   Run **Dynamic Quantization** inference and measure accuracy/latency.
+        *   Run **Calibration** for Static Quantization.
+        *   Run **Static Quantization** inference and measure accuracy/latency.
+        *   Compare results (Accuracy vs. Latency vs. Memory) against Float32 baseline.
 *   **Performance Benchmark**:
     *   Measure and plot the inference latency (time per batch) for:
         *   Float32 Model
