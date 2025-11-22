@@ -87,22 +87,76 @@ class Linear(Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        ### BEGIN YOUR SOLUTION
         self.weight = Parameter(init.kaiming_uniform(in_features, out_features, device=device, dtype=dtype))
         if bias:
             self.bias = Parameter(init.kaiming_uniform(out_features, 1, device=device, dtype=dtype).reshape((1, out_features)))
-        ### END YOUR SOLUTION
+        else:
+            self.bias = None
+            
+        # Quantization support
+        from needle import quantization
+        self.observer = quantization.MinMaxObserver()
+        self.quantized_weight = None
+        self.weight_scale = None
+        self.weight_zp = None
+        self.input_scale = None
+        self.input_zp = None
+
+    def quantize_weights(self):
+        from needle import quantization
+        w_data = self.weight.detach().numpy()
+        scale, zp = quantization.compute_scale_zero_point(w_data.min(), w_data.max())
+        self.weight_scale = scale
+        self.weight_zp = zp
+        self.quantized_weight = self.weight.quantize_int8(scale, zp)
+
+    def quantize_activations_static(self, x):
+        if self.input_scale is None:
+            scale, zp = self.observer.get_qparams()
+            self.input_scale = scale
+            self.input_zp = zp
+        return x.quantize_int8(self.input_scale, self.input_zp)
 
     def forward(self, X: Tensor) -> Tensor:
-        ### BEGIN YOUR SOLUTION
+        # Calibration Mode
+        if hasattr(self, 'calibration_mode') and self.calibration_mode:
+            self.observer.update(X)
+            return self._float_forward(X)
+            
+        # Quantized Mode check
+        if self.quantized_weight is not None:
+            from needle import quantization
+            # Check if we can do static quantization on input
+            if self.input_scale is not None or (hasattr(self.observer, 'min_val') and self.observer.min_val != float('inf')):
+                X_quant = self.quantize_activations_static(X)
+            else:
+                # Dynamic quantization
+                x_data = X.numpy()
+                scale, zp = quantization.compute_scale_zero_point(x_data.min(), x_data.max())
+                X_quant = X.quantize_int8(scale, zp)
+                
+            X_shape = X.shape
+            if len(X_shape) > 2:
+                X_quant = X_quant.reshape((np.prod(X_shape[:-1]), self.in_features))
+                
+            out = X_quant @ self.quantized_weight
+            
+            if self.bias is not None:
+                out = out + ops.broadcast_to(self.bias, out.shape)
+                
+            return out.reshape((*X_shape[:-1], self.out_features))
+            
+        else:
+            return self._float_forward(X)
+
+    def _float_forward(self, X):
         X_shape = X.shape
         assert X_shape[-1] == self.in_features
         X = X.reshape((np.prod(X_shape[:-1]), self.in_features))
         X = ops.matmul(X, self.weight)
-        if hasattr(self, 'bias'):
+        if self.bias is not None:
             X = X + ops.broadcast_to(self.bias, X.shape)
         return X.reshape((*X_shape[:-1], self.out_features))
-        ### END YOUR SOLUTION
 
 
 class Flatten(Module):

@@ -359,8 +359,17 @@ class Tensor(Value):
     def transpose(self, axes=None):
         return needle.ops.Transpose(axes)(self)
 
+    def astype(self, dtype):
+        data = self.realize_cached_data().astype(dtype)
+        return Tensor.make_const(data)
 
+    def quantize_int8(self, scale, zero_point):
+        data = self.realize_cached_data().quantize_int8(scale, zero_point)
+        return Tensor.make_const(data)
 
+    def dequantize(self):
+        data = self.realize_cached_data().dequantize()
+        return Tensor.make_const(data)
 
     __radd__ = __add__
     __rmul__ = __mul__

@@ -7,8 +7,8 @@ _datetype_size = np.dtype(_datatype).itemsize
 
 
 class Array:
-    def __init__(self, size):
-        self.array = np.empty(size, dtype=np.float32)
+    def __init__(self, size, dtype="float32"):
+        self.array = np.empty(size, dtype=dtype)
 
     @property
     def size(self):
@@ -109,9 +109,21 @@ def matmul(a, b, out, m, n, p):
     out.array[:] = (a.array.reshape(m, n) @ b.array.reshape(n, p)).reshape(-1)
 
 
+def matmul_int8(a, b, out, sa, za, sb, zb):
+    # a, b are int8, out is float32
+    # We dequantize and multiply
+    a_deq = (a.array.astype(np.float32) - za) * sa
+    b_deq = (b.array.astype(np.float32) - zb) * sb
+    out.array[:] = a_deq @ b_deq
+
+
 def reduce_max(a, out, reduce_size):
     out.array[:] = a.array[:].reshape(-1, reduce_size).max(axis=1)
 
 
 def reduce_sum(a, out, reduce_size):
     out.array[:] = a.array[:].reshape(-1, reduce_size).sum(axis=1)
+
+
+def quantize_int8(src, dst, scale, zero_point):
+    dst.array[:] = np.clip(np.round(src.array / scale + zero_point), -128, 127).astype(np.int8)

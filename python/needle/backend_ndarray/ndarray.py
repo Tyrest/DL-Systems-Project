@@ -45,12 +45,10 @@ class BackendDevice:
 
     def empty(self, shape, dtype="float32"):
         dtype = "float32" if dtype is None else dtype
-        assert dtype == "float32"
-        return NDArray.make(shape, device=self)
+        return NDArray.make(shape, device=self, dtype=dtype)
 
     def full(self, shape, fill_value, dtype="float32"):
         dtype = "float32" if dtype is None else dtype
-        assert dtype == "float32"
         arr = self.empty(shape, dtype)
         arr.fill(fill_value)
         return arr
@@ -99,15 +97,23 @@ class NDArray:
 
     def __init__(self, other, device=None):
         """Create by copying another NDArray, or from numpy"""
+        self._dtype = "float32"
+        self._quant_params = None
         if isinstance(other, NDArray):
             # create a copy of existing NDArray
             if device is None:
                 device = other.device
             self._init(other.to(device) + 0.0)  # this creates a copy
+            self._dtype = other.dtype
+            self._quant_params = other._quant_params
         elif isinstance(other, np.ndarray):
             # create copy from numpy array
             device = device if device is not None else default_device()
-            array = self.make(other.shape, device=device)
+            dtype = str(other.dtype)
+            if "float" in dtype: dtype = "float32"
+            elif "int8" in dtype: dtype = "int8"
+            else: dtype = "float32"
+            array = self.make(other.shape, device=device, dtype=dtype)
             array.device.from_numpy(np.ascontiguousarray(other), array._handle)
             self._init(array)
         else:
@@ -121,6 +127,8 @@ class NDArray:
         self._offset = other._offset
         self._device = other._device
         self._handle = other._handle
+        self._dtype = other._dtype
+        self._quant_params = other._quant_params
 
     @staticmethod
     def compact_strides(shape):
@@ -133,7 +141,7 @@ class NDArray:
         return tuple(res[::-1])
 
     @staticmethod
-    def make(shape, strides=None, device=None, handle=None, offset=0):
+    def make(shape, strides=None, device=None, handle=None, offset=0, dtype="float32"):
         """Create a new NDArray with the given properties.  This will allocation the
         memory if handle=None, otherwise it will use the handle of an existing
         array."""
@@ -142,8 +150,11 @@ class NDArray:
         array._strides = NDArray.compact_strides(shape) if strides is None else strides
         array._offset = offset
         array._device = device if device is not None else default_device()
+        array._dtype = dtype
+        array._quant_params = None
         if handle is None:
-            array._handle = array.device.Array(prod(shape))
+            dtype_int = 1 if dtype == "int8" else 0
+            array._handle = array.device.Array(prod(shape), dtype=dtype_int)
         else:
             array._handle = handle
         return array
@@ -163,8 +174,7 @@ class NDArray:
 
     @property
     def dtype(self):
-        # only support float32 for now
-        return "float32"
+        return self._dtype
 
     @property
     def ndim(self):
@@ -544,6 +554,43 @@ class NDArray:
         assert self.ndim == 2 and other.ndim == 2
         assert self.shape[1] == other.shape[0]
 
+        # Check for int8 quantization
+        if self.dtype == "int8" and other.dtype == "int8":
+            if self._quant_params and other._quant_params:
+                m, n, p = self.shape[0], self.shape[1], other.shape[1]
+                out = NDArray.make((m, p), device=self.device, dtype="float32")
+                
+                sa = self._quant_params["scale"]
+                za = self._quant_params["zero_point"]
+                sb = other._quant_params["scale"]
+                zb = other._quant_params["zero_point"]
+                
+                if hasattr(self.device, "matmul_int8"):
+                    self.device.matmul_int8(
+                        self.compact()._handle, other.compact()._handle, out._handle,
+                        m, n, p,
+                        sa, za, sb, zb
+                    )
+                    return out
+                else:
+                    return self.dequantize() @ other.dequantize()
+            else:
+                return self.astype("float32") @ other.astype("float32")
+
+        # If mixed types, cast to float32
+        if self.dtype != "float32":
+            lhs = self.dequantize() if self.dtype == "int8" else self.astype("float32")
+        else:
+            lhs = self
+            
+        if other.dtype != "float32":
+            rhs = other.dequantize() if other.dtype == "int8" else other.astype("float32")
+        else:
+            rhs = other
+            
+        if lhs is not self or rhs is not other:
+            return lhs @ rhs
+
         m, n, p = self.shape[0], self.shape[1], other.shape[1]
 
         # if the matrix is aligned, use tiled matrix multiplication
@@ -654,6 +701,48 @@ class NDArray:
         return out
         ### END YOUR SOLUTION
 
+    def astype(self, dtype):
+        if dtype == self.dtype:
+            return self
+        out = NDArray.make(self.shape, device=self.device, dtype=dtype)
+        out.device.from_numpy(self.numpy().astype(dtype), out._handle)
+        return out
+
+    def quantize_int8(self, scale, zero_point):
+        if self.dtype != "float32":
+            raise ValueError("Only float32 arrays can be quantized to int8")
+        
+        out = NDArray.make(self.shape, device=self.device, dtype="int8")
+        out._quant_params = {"scale": scale, "zero_point": zero_point}
+        
+        if hasattr(self.device, "quantize_int8"):
+            self.device.quantize_int8(self.compact()._handle, out._handle, scale, zero_point)
+        else:
+            out.device.from_numpy(
+                np.clip(np.round(self.numpy() / scale + zero_point), -128, 127).astype(np.int8),
+                out._handle
+            )
+        return out
+
+    def dequantize(self):
+        if self.dtype != "int8":
+            raise ValueError("Only int8 arrays can be dequantized")
+        if self._quant_params is None:
+            raise ValueError("Missing quantization parameters")
+            
+        scale = self._quant_params["scale"]
+        zero_point = self._quant_params["zero_point"]
+        
+        out = NDArray.make(self.shape, device=self.device, dtype="float32")
+        
+        if hasattr(self.device, "dequantize_int8"):
+            self.device.dequantize_int8(self.compact()._handle, out._handle, scale, zero_point)
+        else:
+            out.device.from_numpy(
+                (self.numpy().astype(np.float32) - zero_point) * scale,
+                out._handle
+            )
+        return out
 def array(a, dtype="float32", device=None):
     """Convenience methods to match numpy a bit more closely."""
     dtype = "float32" if dtype is None else dtype
