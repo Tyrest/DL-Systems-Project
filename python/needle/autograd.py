@@ -1,7 +1,7 @@
 """Core data structures."""
 import needle
 from .backend_numpy import Device, cpu, all_devices
-from typing import List, Optional, NamedTuple, Tuple, Union
+from typing import List, Optional, NamedTuple, Tuple, Union, Dict
 from collections import namedtuple
 import numpy
 
@@ -393,11 +393,11 @@ def compute_gradient_of_variables(output_tensor, out_grad):
                 node_to_output_grads_list[input] = []
             node_to_output_grads_list[input].append(out_grad)
 
-    for node in reverse_topo_order:
-        if not node.is_leaf() and not isinstance(node, TensorTuple):
-            node.cached_data = None
-            node.grad = None
-            node.inputs = []
+    # for node in reverse_topo_order:
+    #     if not node.is_leaf() and not isinstance(node, TensorTuple):
+    #         node.cached_data = None
+    #         node.grad = None
+    #         node.inputs = []
     ### END YOUR SOLUTION
 
 

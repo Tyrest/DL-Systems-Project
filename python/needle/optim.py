@@ -40,7 +40,17 @@ class SGD(Optimizer):
         Clips gradient norm of parameters.
         """
         ### BEGIN YOUR SOLUTION
-        raise NotImplementedError()
+        total_norm = 0.0
+        for p in self.params:
+            if p.grad is not None:
+                param_norm = ndl.ops.norm(p.grad.detach(), ord=2).item()
+                total_norm += param_norm ** 2
+        total_norm = total_norm ** 0.5
+        clip_coef = max_norm / (total_norm + 1e-6)
+        if clip_coef < 1:
+            for p in self.params:
+                if p.grad is not None:
+                    p.grad.data *= clip_coef
         ### END YOUR SOLUTION
 
 
