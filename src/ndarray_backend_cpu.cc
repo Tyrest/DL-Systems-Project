@@ -3,8 +3,10 @@
 #include <pybind11/stl.h>
 
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 namespace needle {
 namespace cpu {
@@ -363,6 +365,49 @@ void ReduceSum(const AlignedArray& a, AlignedArray* out, size_t reduce_size) {
   /// END SOLUTION
 }
 
+pybind11::array_t<float> MatmulInt8(pybind11::array_t<int8_t, pybind11::array::c_style | pybind11::array::forcecast> a,
+                                    pybind11::array_t<int8_t, pybind11::array::c_style | pybind11::array::forcecast> b,
+                                    float a_scale, float b_scale) {
+  auto a_buf = a.request();
+  auto b_buf = b.request();
+  if (a_buf.ndim != 2 || b_buf.ndim != 2) {
+    throw std::runtime_error("int8 matmul expects 2D inputs");
+  }
+  auto m = a_buf.shape[0];
+  auto k_a = a_buf.shape[1];
+  auto k_b = b_buf.shape[0];
+  auto n = b_buf.shape[1];
+  if (k_a != k_b) {
+    throw std::runtime_error("Inner dims must match");
+  }
+  // Transpose B to make columns contiguous for vectorized dot products.
+  std::vector<int8_t> bT(n * k_a);
+  {
+    int8_t* b_ptr = static_cast<int8_t*>(b_buf.ptr);
+    for (ssize_t kk = 0; kk < k_a; kk++) {
+      for (ssize_t j = 0; j < n; j++) {
+        bT[j * k_a + kk] = b_ptr[kk * n + j];
+      }
+    }
+  }
+  pybind11::array_t<float> out({m, n});
+  auto out_buf = out.request();
+  int8_t* a_ptr = static_cast<int8_t*>(a_buf.ptr);
+  float* o_ptr = static_cast<float*>(out_buf.ptr);
+  for (ssize_t i = 0; i < m; i++) {
+    int8_t* ai = a_ptr + i * k_a;
+    for (ssize_t j = 0; j < n; j++) {
+      int32_t acc = 0;
+      for (ssize_t kk = 0; kk < k_a; kk++) {
+        acc += static_cast<int32_t>(ai[kk]) *
+               static_cast<int32_t>(bT[j * k_a + kk]);
+      }
+      o_ptr[i * n + j] = static_cast<float>(acc) * a_scale * b_scale;
+    }
+  }
+  return out;
+}
+
 }  // namespace cpu
 }  // namespace needle
 
@@ -423,4 +468,6 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+
+  m.def("matmul_int8", MatmulInt8);
 }

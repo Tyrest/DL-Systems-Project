@@ -1,10 +1,12 @@
 """The module.
 """
 from typing import Any
+import os
 from needle.autograd import Tensor
 from needle import ops
 import needle.init as init
 import numpy as np
+from needle import quantization
 
 
 class Parameter(Tensor):
@@ -64,11 +66,22 @@ class Module:
         self.training = False
         for m in self._children():
             m.training = False
+        return self
 
     def train(self) -> None:
         self.training = True
         for m in self._children():
             m.training = True
+        return self
+
+    def quantize(self, **kwargs) -> "Module":
+        """Recursively quantize child modules that expose enable_quantization."""
+        if hasattr(self, "enable_quantization"):
+            self.enable_quantization(**kwargs)
+        for m in self._children():
+            if hasattr(m, "quantize"):
+                m.quantize(**kwargs)
+        return self
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
@@ -80,10 +93,22 @@ class Identity(Module):
 
 
 class Linear(Module):
-    def __init__(self, in_features: int, out_features: int, bias: bool = True, device: Any | None = None, dtype: str = "float32") -> None:
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        device: Any | None = None,
+        dtype: str = "float32",
+        use_int8: bool = False,
+    ) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self.use_int8 = use_int8
+        self._weight_q = None
+        self._weight_deq = None
+        self._quant_axis = 1
 
         ### BEGIN YOUR SOLUTION
         self.weight = Parameter(init.kaiming_uniform(in_features, out_features, device=device, dtype=dtype))
@@ -91,19 +116,49 @@ class Linear(Module):
             self.bias = Parameter(init.kaiming_uniform(out_features, 1, device=device, dtype=dtype).reshape((1, out_features)))
         ### END YOUR SOLUTION
 
+    def enable_quantization(self, *, axis: int | None = None, symmetric: bool = True) -> quantization.QuantizedTensor:
+        """Quantize weights for inference; keeps float32 weights for training."""
+        axis = self._quant_axis if axis is None else axis
+        self._weight_q = quantization.quantize_int8(self.weight.detach(), axis=axis, symmetric=symmetric)
+        self.use_int8 = True
+        # Cache dequantized float weight to avoid per-call reconstruction overhead
+        self._weight_deq = self._weight_q.dequantize(device=self.weight.device)
+        return self._weight_q
+
+    def disable_quantization(self) -> None:
+        self._weight_q = None
+        self._weight_deq = None
+        self.use_int8 = False
+
     def forward(self, X: Tensor) -> Tensor:
         ### BEGIN YOUR SOLUTION
-        X = ops.matmul(X, self.weight)
-        if hasattr(self, 'bias'):
-            X = X + ops.broadcast_to(self.bias, X.shape)
-        return X
+        if self.use_int8 and not self.training and self._weight_q is not None:
+            use_int8_kernel = os.environ.get("NEEDLE_USE_INT8_MATMUL", "0") == "1"
+            if use_int8_kernel:
+                try:
+                    out = quantization.quantized_matmul_int8(X, self._weight_q, getattr(self, "bias", None))
+                    return out
+                except Exception:
+                    pass
+            weight = self._weight_deq if self._weight_deq is not None else self._weight_q.dequantize(device=X.device)
+            out = ops.matmul(X, weight)
+            if hasattr(self, "bias"):
+                out = out + ops.broadcast_to(self.bias, out.shape)
+        else:
+            out = ops.matmul(X, self.weight)
+            if hasattr(self, "bias"):
+                out = out + ops.broadcast_to(self.bias, out.shape)
+        return out
         ### END YOUR SOLUTION
 
 
 class Flatten(Module):
     def forward(self, X: Tensor) -> Tensor:
         ### BEGIN YOUR SOLUTION
-        return ops.reshape(X, (X.shape[0], -1))
+        size = 1
+        for s in X.shape[1:]:
+            size *= s
+        return ops.reshape(X, (X.shape[0], size))
         ### END YOUR SOLUTION
 
 

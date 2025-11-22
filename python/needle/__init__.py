@@ -8,4 +8,6 @@ from .init import ones, zeros, zeros_like, ones_like
 from . import data
 from . import nn
 from . import optim
+from . import quantization
+from .quantization import QuantizedTensor, quantize_int8, dequantize_int8, quantized_matmul
 from .backend_selection import *
