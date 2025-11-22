@@ -122,7 +122,7 @@ class Linear(Module):
         self._weight_q = quantization.quantize_int8(self.weight.detach(), axis=axis, symmetric=symmetric)
         self.use_int8 = True
         # Cache dequantized float weight to avoid per-call reconstruction overhead
-        self._weight_deq = self._weight_q.dequantize()
+        self._weight_deq = self._weight_q.dequantize(device=self.weight.device)
         return self._weight_q
 
     def disable_quantization(self) -> None:
@@ -140,7 +140,7 @@ class Linear(Module):
                     return out
                 except Exception:
                     pass
-            weight = self._weight_deq if self._weight_deq is not None else self._weight_q.dequantize()
+            weight = self._weight_deq if self._weight_deq is not None else self._weight_q.dequantize(device=X.device)
             out = ops.matmul(X, weight)
             if hasattr(self, "bias"):
                 out = out + ops.broadcast_to(self.bias, out.shape)
@@ -155,7 +155,10 @@ class Linear(Module):
 class Flatten(Module):
     def forward(self, X: Tensor) -> Tensor:
         ### BEGIN YOUR SOLUTION
-        return ops.reshape(X, (X.shape[0], -1))
+        size = 1
+        for s in X.shape[1:]:
+            size *= s
+        return ops.reshape(X, (X.shape[0], size))
         ### END YOUR SOLUTION
 
 

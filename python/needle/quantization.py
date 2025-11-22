@@ -20,7 +20,10 @@ ArrayLike = Union[np.ndarray, Tensor, Iterable[float]]
 
 def _to_numpy(arr: ArrayLike) -> np.ndarray:
     if isinstance(arr, Tensor):
-        return np.array(arr.realize_cached_data(), dtype=np.float32)
+        data = arr.realize_cached_data()
+        if hasattr(data, "numpy"):
+            return data.numpy().astype(np.float32)
+        return np.array(data, dtype=np.float32)
     return np.array(arr, dtype=np.float32)
 
 
@@ -59,7 +62,7 @@ class QuantizedTensor:
     data: np.ndarray
     scale: np.ndarray
     zero_point: np.ndarray
-    cached_dequantized: Optional[np.ndarray] = None
+    cached_dequantized: Union[Tensor, None] = None
 
     def __post_init__(self) -> None:
         assert self.data.dtype == np.int8, "Quantized data must be int8"
@@ -68,12 +71,18 @@ class QuantizedTensor:
 
     def dequantize(self, device=None) -> Tensor:
         """Dequantize into a float32 Tensor detached from autograd."""
-        if self.cached_dequantized is None:
-            scale = self.scale
-            zero_point = self.zero_point.astype(np.int32)
-            float_data = (self.data.astype(np.int32) - zero_point) * scale
-            self.cached_dequantized = float_data.astype(np.float32)
-        return Tensor.make_const(self.cached_dequantized, requires_grad=False)
+        if self.cached_dequantized is not None:
+            if device is None or self.cached_dequantized.device == device:
+                return self.cached_dequantized.detach()
+            # If device mismatch, we re-compute (or could move, but re-compute from int8 is safer/simpler)
+
+        scale = self.scale
+        zero_point = self.zero_point.astype(np.int32)
+        float_data = (self.data.astype(np.int32) - zero_point) * scale
+        float_data = float_data.astype(np.float32)
+        
+        self.cached_dequantized = Tensor(float_data, device=device, requires_grad=False)
+        return self.cached_dequantized.detach()
 
     def memory_bytes(self) -> int:
         return int(self.data.nbytes + self.scale.nbytes + self.zero_point.nbytes)
@@ -101,7 +110,7 @@ def dequantize_int8(q: QuantizedTensor, device=None) -> Tensor:
 
 def quantized_matmul(lhs: Tensor, rhs: QuantizedTensor, bias: Optional[Tensor] = None) -> Tensor:
     """Matrix multiply using cached dequantized weights to avoid per-call overhead."""
-    weight = rhs.dequantize()
+    weight = rhs.dequantize(device=lhs.device)
     out = lhs @ weight
     if bias is not None:
         out = out + bias
@@ -113,9 +122,7 @@ def quantized_matmul_int8(lhs: Tensor, rhs: QuantizedTensor, bias: Optional[Tens
 
     Note: rhs.scale is reduced to a scalar (mean) if per-axis; this keeps API simple.
     """
-    import needle.backend_ndarray.ndarray_backend_cpu as cpu_backend  # type: ignore[import-not-found]
-
-    lhs_np = lhs.realize_cached_data().astype(np.float32)
+    lhs_np = lhs.numpy().astype(np.float32)
     # activation quantization
     a_scale = np.max(np.abs(lhs_np))
     if a_scale == 0:
@@ -127,7 +134,11 @@ def quantized_matmul_int8(lhs: Tensor, rhs: QuantizedTensor, bias: Optional[Tens
     w_int8 = rhs.data
     w_scale = rhs.scale.mean().item() if rhs.scale.size > 1 else float(rhs.scale.item())
 
-    out = cpu_backend.matmul_int8(a_int8, w_int8, float(a_scale), float(w_scale))
+    out = lhs.device.matmul_int8(a_int8, w_int8, float(a_scale), float(w_scale))
+        
     if bias is not None:
-        out += bias.realize_cached_data()
-    return Tensor.make_const(out.astype(np.float32), requires_grad=False)
+        out += bias.numpy()
+    
+    # The output of matmul_int8 is a numpy array (float32)
+    # We need to convert it back to a Tensor on the correct device
+    return Tensor(out, device=lhs.device, requires_grad=False)

@@ -58,6 +58,12 @@ class BackendDevice:
         arr.fill(fill_value)
         return arr
 
+    def ones(self, *shape: int, dtype: str = "float32") -> "NDArray":
+        return self.full(shape, 1.0, dtype)
+
+    def zeros(self, *shape: int, dtype: str = "float32") -> "NDArray":
+        return self.full(shape, 0.0, dtype)
+
 
 def cuda() -> BackendDevice:
     """Return cuda device"""

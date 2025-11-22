@@ -11,45 +11,19 @@ Usage (defaults are light for demo):
 import argparse
 import os
 import sys
-import gzip
-import urllib.request
-from pathlib import Path
 import numpy as np
 import time
-
-
-MNIST_URLS = {
-    "train-images": [
-        "https://storage.googleapis.com/cvdf-datasets/mnist/train-images-idx3-ubyte.gz",
-        "https://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz",
-        "http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz",
-    ],
-    "train-labels": [
-        "https://storage.googleapis.com/cvdf-datasets/mnist/train-labels-idx1-ubyte.gz",
-        "https://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz",
-        "http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz",
-    ],
-    "test-images": [
-        "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-images-idx3-ubyte.gz",
-        "https://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz",
-        "http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz",
-    ],
-    "test-labels": [
-        "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-labels-idx1-ubyte.gz",
-        "https://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz",
-        "http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz",
-    ],
-}
-
+from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     """CLI args for MNIST training demo (float32 vs quantized)."""
     p = argparse.ArgumentParser(description="Train MNIST float32 vs int8 models.")
-    p.add_argument("--data-dir", type=str, default="data/mnist", help="Where to store MNIST gzip files.")
+    p.add_argument("--data-dir", type=str, default="data", help="Where to store MNIST gzip files.")
     p.add_argument("--epochs", type=int, default=5, help="Number of training epochs.")
     p.add_argument("--batch-size", type=int, default=256, help="Batch size.")
     p.add_argument("--lr", type=float, default=0.01, help="Learning rate.")
     p.add_argument("--hidden", type=int, default=512, help="Hidden size for MLP.")
+    p.add_argument("--device", type=str, default="cpu", help="Device to run on (cpu or cuda)")
     return p.parse_args()
 
 
@@ -60,82 +34,31 @@ def ensure_backend() -> None:
     sys.path.append("./python")
 
 
-def download_mnist(data_dir: Path) -> dict:
-    """Download MNIST from multiple mirrors if not present."""
-    data_dir.mkdir(parents=True, exist_ok=True)
-    paths = {}
-    for key, url_list in MNIST_URLS.items():
-        fname = data_dir / f"{key}.gz"
-        paths[key] = fname
-        if not fname.exists():
-            success = False
-            for url in url_list:
-                try:
-                    print(f"Downloading {url} -> {fname}")
-                    urllib.request.urlretrieve(url, fname)
-                    success = True
-                    break
-                except Exception as e:
-                    print(f"Failed {url}: {e}")
-            if not success:
-                raise RuntimeError(f"Could not download {key} from any mirror")
-    return paths
-
-
-def load_images(path: Path) -> np.ndarray:
-    """Read IDX image file and return flattened float32 images."""
-    with gzip.open(path, "rb") as f:
-        magic = int.from_bytes(f.read(4), "big")
-        assert magic == 2051
-        num = int.from_bytes(f.read(4), "big")
-        rows = int.from_bytes(f.read(4), "big")
-        cols = int.from_bytes(f.read(4), "big")
-        data = np.frombuffer(f.read(), dtype=np.uint8).reshape(num, rows, cols)
-        return (data.astype(np.float32) / 255.0).reshape(num, -1)
-
-
-def load_labels(path: Path) -> np.ndarray:
-    """Read IDX label file and return label array."""
-    with gzip.open(path, "rb") as f:
-        magic = int.from_bytes(f.read(4), "big")
-        assert magic == 2049
-        num = int.from_bytes(f.read(4), "big")
-        labels = np.frombuffer(f.read(), dtype=np.uint8)
-        assert labels.shape[0] == num
-        return labels
-
-
-def iterate_batches(X, y, batch_size, shuffle=True):
-    """Yield mini-batches of numpy data."""
-    idx = np.arange(len(X))
-    if shuffle:
-        np.random.shuffle(idx)
-    for i in range(0, len(idx), batch_size):
-        batch_idx = idx[i : i + batch_size]
-        yield X[batch_idx], y[batch_idx]
-
-
-def build_model(in_dim: int, hidden: int, out_dim: int):
+def build_model(in_dim: int, hidden: int, out_dim: int, device=None):
     import needle as ndl
 
     return ndl.nn.Sequential(
-        ndl.nn.Linear(in_dim, hidden),
+        ndl.nn.Flatten(),
+        ndl.nn.Linear(in_dim, hidden, device=device),
         ndl.nn.ReLU(),
-        ndl.nn.Linear(hidden, out_dim),
+        ndl.nn.Linear(hidden, out_dim, device=device),
     )
 
 
-def accuracy(model, X, y, batch_size=512):
+def accuracy(model, dataloader, device=None):
     """Compute accuracy over a dataset using mini-batches."""
     import needle as ndl
 
     correct = 0
     total = 0
-    for xb, yb in iterate_batches(X, y, batch_size, shuffle=False):
-        logits = model(ndl.Tensor(xb, requires_grad=False))
+    model.eval()
+    for batch in dataloader:
+        xb, yb = batch
+        xb, yb = ndl.Tensor(xb, device=device), ndl.Tensor(yb, device=device)
+        logits = model(xb)
         preds = np.argmax(logits.numpy(), axis=1)
-        correct += (preds == yb).sum()
-        total += len(yb)
+        correct += (preds == yb.numpy()).sum()
+        total += yb.shape[0]
     return correct / total
 
 
@@ -144,16 +67,32 @@ def main() -> None:
     args = parse_args()
     ensure_backend()
     import needle as ndl
+    from needle.data import MNISTDataset, DataLoader
+
+    if args.device == "cpu":
+        device = ndl.cpu()
+    elif args.device == "cuda":
+        device = ndl.cuda()
+    else:
+        raise ValueError(f"Unknown device: {args.device}")
 
     # Data
-    paths = download_mnist(Path(args.data_dir))
-    X_train = load_images(paths["train-images"])
-    y_train = load_labels(paths["train-labels"])
-    X_test = load_images(paths["test-images"])
-    y_test = load_labels(paths["test-labels"])
+    data_dir = Path(args.data_dir)
+    train_dataset = MNISTDataset(
+        str(data_dir / "train-images-idx3-ubyte.gz"),
+        str(data_dir / "train-labels-idx1-ubyte.gz")
+    )
+    test_dataset = MNISTDataset(
+        str(data_dir / "t10k-images-idx3-ubyte.gz"),
+        str(data_dir / "t10k-labels-idx1-ubyte.gz")
+    )
 
-    in_dim, out_dim = X_train.shape[1], 10
-    model = build_model(in_dim, args.hidden, out_dim)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=512, shuffle=False)
+
+    # Input dim is 28*28 = 784
+    in_dim, out_dim = 784, 10
+    model = build_model(in_dim, args.hidden, out_dim, device=device)
     loss_fn = ndl.nn.SoftmaxLoss()
 
     def train_model(model, opt, label):
@@ -162,11 +101,11 @@ def main() -> None:
         t0 = time.perf_counter()
         for epoch in range(args.epochs):
             losses = []
-            for xb, yb in iterate_batches(X_train, y_train, args.batch_size, shuffle=True):
-                xb_t = ndl.Tensor(xb, requires_grad=False)
-                yb_t = ndl.Tensor(yb, requires_grad=False)
-                logits = model(xb_t)
-                loss = loss_fn(logits, yb_t)
+            for batch in train_loader:
+                xb, yb = batch
+                xb, yb = ndl.Tensor(xb, device=device), ndl.Tensor(yb, device=device)
+                logits = model(xb)
+                loss = loss_fn(logits, yb)
                 loss.backward()
                 opt.step()
                 opt.reset_grad()
@@ -177,35 +116,26 @@ def main() -> None:
     # Train float32 model
     opt_float = ndl.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
     train_time_float = train_model(model, opt_float, "float32")
-    model.eval()
+    
     t_eval_float = time.perf_counter()
-    acc_float = accuracy(model, X_test, y_test, batch_size=512)
+    acc_float = accuracy(model, test_loader, device=device)
     eval_float_time = time.perf_counter() - t_eval_float
 
-    # Independent int8 model (trained separately)
-    model_int8 = build_model(in_dim, args.hidden, out_dim)
-    opt_int8 = ndl.optim.SGD(model_int8.parameters(), lr=args.lr, momentum=0.9)
-    train_time_int8 = train_model(model_int8, opt_int8, "int8-train")
-    model_int8.eval()
-    model_int8.quantize()
+    # Quantize and evaluate the SAME model
+    print("Quantizing model...")
+    model.eval()
+    # Enable quantization for Linear layers
+    model.quantize(axis=1)
+    
+    # Enable int8 matmul kernel
+    os.environ["NEEDLE_USE_INT8_MATMUL"] = "1"
+            
     t_eval_int8 = time.perf_counter()
-    acc_int8 = accuracy(model_int8, X_test, y_test, batch_size=512)
+    acc_int8 = accuracy(model, test_loader, device=device)
     eval_int8_time = time.perf_counter() - t_eval_int8
-
-    # Memory footprint
-    float_params = sum(int(np.prod(p.shape)) for p in model.parameters())
-    float_mem = float_params * 4  # bytes
-    quant_bytes = 0
-    for m in model_int8._children():
-        if hasattr(m, "_weight_q") and m._weight_q is not None:
-            quant_bytes += m._weight_q.memory_bytes()
-            if hasattr(m, "bias"):
-                quant_bytes += m.bias.detach().numpy().size * 4
 
     print(f"Float32 accuracy: {acc_float*100:.2f}%")
     print(f"Int8 (weights) accuracy: {acc_int8*100:.2f}%")
-    print(f"Float32 params: {float_params:,}, approx memory: {float_mem/1e6:.3f} MB")
-    print(f"Int8 weight memory (with scale/zp + bias): {quant_bytes/1e6:.3f} MB")
     print(f"Eval times: float={eval_float_time:.2f}s | int8={eval_int8_time:.2f}s")
 
 

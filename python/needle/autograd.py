@@ -1,7 +1,7 @@
 """Core data structures."""
 import needle
-from .backend_numpy import Device, cpu, all_devices
-from typing import List, Optional, NamedTuple, Tuple, Union
+from .backend_numpy import Device, all_devices
+from typing import List, Optional, NamedTuple, Tuple, Union, Dict
 from collections import namedtuple, defaultdict
 import numpy
 
@@ -16,6 +16,8 @@ TENSOR_COUNTER = 0
 
 import numpy as array_api
 NDArray = numpy.ndarray
+
+from .backend_selection import array_api, NDArray, default_device, cpu
 
 
 class Op:
@@ -215,7 +217,7 @@ class Tensor(Value):
                     array.numpy(), device=device, dtype=dtype
                 )
         else:
-            device = device if device else cpu()
+            device = device if device else default_device()
             cached_data = Tensor._array_from_numpy(array, device=device, dtype=dtype)
 
         self._init(

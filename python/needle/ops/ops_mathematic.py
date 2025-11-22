@@ -11,7 +11,8 @@ import numpy
 # NOTE: we will import numpy as the array_api
 # as the backend for our computations, this line will change in later homeworks
 
-import numpy as array_api
+from ..backend_selection import array_api, BACKEND
+from .ops_tuple import *
 
 
 class EWiseAdd(TensorOp):
@@ -161,6 +162,9 @@ class Transpose(TensorOp):
             )
         else:
             new_axes[-1], new_axes[-2] = new_axes[-2], new_axes[-1]
+        
+        if hasattr(a, "permute"):
+            return a.permute(tuple(new_axes))
         return array_api.transpose(a, new_axes)
         ### END YOUR SOLUTION
 
@@ -180,6 +184,8 @@ class Reshape(TensorOp):
 
     def compute(self, a):
         ### BEGIN YOUR SOLUTION
+        if hasattr(a, "compact"):
+            a = a.compact()
         return array_api.reshape(a, self.shape)
         ### END YOUR SOLUTION
 
@@ -338,7 +344,7 @@ class ReLU(TensorOp):
 
     def gradient(self, out_grad, node):
         ### BEGIN YOUR SOLUTION
-        return out_grad * Tensor(node.inputs[0].realize_cached_data() > 0)
+        return out_grad * Tensor(node.inputs[0].realize_cached_data() > 0, device=out_grad.device)
         ### END YOUR SOLUTION
 
 

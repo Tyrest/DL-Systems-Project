@@ -1,5 +1,5 @@
 import numpy as np
-
+from . import ndarray_backend_cpu
 
 __device_name__ = "numpy"
 _datatype = np.float32
@@ -103,6 +103,10 @@ def ewise_exp(a, out):
 
 def ewise_tanh(a, out):
     out.array[:] = np.tanh(a.array)
+
+
+def matmul_int8(a, b, a_scale, w_scale):
+    return ndarray_backend_cpu.matmul_int8(a, b, a_scale, w_scale)
 
 
 def matmul(a, b, out, m, n, p):
